@@ -1,0 +1,9 @@
+---
+- name: Update GRUB on Debian/Ubuntu
+  ansible.builtin.command:
+    cmd: update-grub
+
+- name: Reboot required notice
+  ansible.builtin.debug:
+    msg: "System updates and IOMMU kernel parameters were applied. Please reboot your machine for changes to take effect."
+

@@ -1,0 +1,23 @@
+---
+- name: Validate Google Chrome platform support
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] == "Debian" or (ansible_facts['os_family'] == "RedHat" and ansible_facts['distribution'] == "Fedora")
+      - ansible_facts['architecture'] == "x86_64"
+    fail_msg: >-
+      Google Chrome installation is supported only on Debian-family systems and
+      Fedora with x86_64 architecture.
+
+- name: Configure Google Chrome repository for RedHat-family systems
+  ansible.builtin.include_tasks: RedHat.yml
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Configure Google Chrome repository for Debian-family systems
+  ansible.builtin.include_tasks: Debian.yml
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Install Google Chrome
+  ansible.builtin.package:
+    name: google-chrome-stable
+    state: present
+    update_cache: true

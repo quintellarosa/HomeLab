@@ -1,0 +1,48 @@
+---
+- name: Remove older or conflicting Docker packages
+  ansible.builtin.dnf:
+    name:
+      - docker
+      - docker-client
+      - docker-client-latest
+      - docker-common
+      - docker-latest
+      - docker-latest-logrotate
+      - docker-logrotate
+      - docker-selinux
+      - docker-engine-selinux
+      - docker-engine
+    state: absent
+
+- name: Add official Docker repository
+  ansible.builtin.copy:
+    dest: /etc/yum.repos.d/docker-ce.repo
+    mode: '0644'
+    content: |
+      [docker-ce-stable]
+      name=Docker CE Stable - $basearch
+      baseurl=https://download.docker.com/linux/fedora/$releasever/$basearch/stable
+      enabled=1
+      gpgcheck=1
+      gpgkey=https://download.docker.com/linux/fedora/gpg
+
+      [docker-ce-stable-source]
+      name=Docker CE Stable - Sources
+      baseurl=https://download.docker.com/linux/fedora/$releasever/source/stable
+      enabled=0
+      gpgcheck=1
+      gpgkey=https://download.docker.com/linux/fedora/gpg
+
+      [docker-ce-test]
+      name=Docker CE Test - $basearch
+      baseurl=https://download.docker.com/linux/fedora/$releasever/$basearch/test
+      enabled=0
+      gpgcheck=1
+      gpgkey=https://download.docker.com/linux/fedora/gpg
+
+      [docker-ce-test-source]
+      name=Docker CE Test - Sources
+      baseurl=https://download.docker.com/linux/fedora/$releasever/source/test
+      enabled=0
+      gpgcheck=1
+      gpgkey=https://download.docker.com/linux/fedora/gpg

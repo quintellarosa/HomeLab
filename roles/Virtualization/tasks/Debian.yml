@@ -1,0 +1,41 @@
+---
+- name: Install virtualization packages
+  ansible.builtin.apt:
+    name:
+      - qemu-system-x86
+      - libvirt-daemon-system
+      - libvirt-clients
+      - bridge-utils
+      - virtinst
+      - virt-manager
+      - libguestfs-tools
+    state: present
+    update_cache: true
+
+- name: Add user to kvm group
+  ansible.builtin.user:
+    name: "{{ target_user }}"
+    groups: kvm
+    append: true
+
+- name: Verify GRUB default command line is present
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.file', '/etc/default/grub') is search('(?m)^GRUB_CMDLINE_LINUX_DEFAULT="')
+    fail_msg: "Cannot enable IOMMU because GRUB_CMDLINE_LINUX_DEFAULT is missing from /etc/default/grub."
+  when:
+    - not virtualization_is_guest
+    - iommu_args not in ansible_facts['cmdline']
+
+- name: Enable IOMMU in GRUB
+  ansible.builtin.lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_CMDLINE_LINUX_DEFAULT="(.*)"'
+    line: 'GRUB_CMDLINE_LINUX_DEFAULT="\1 {{ iommu_args }}"'
+    backrefs: true
+  when:
+    - not virtualization_is_guest
+    - iommu_args not in ansible_facts['cmdline']
+  notify:
+    - Update GRUB on Debian/Ubuntu
+    - Reboot required notice

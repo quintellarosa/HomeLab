@@ -1,0 +1,16 @@
+---
+- name: Homelab Workstation Setup
+  hosts: localhost
+  connection: local
+  become: true
+  roles:
+    - role: SystemUpdate
+    - role: CliTools
+    - role: Gh
+    - role: GoogleChrome
+    - role: VsCode
+    - role: LibvirtBootstrap
+    - role: Virtualization
+    - role: Docker
+    - role: Kubernetes
+    - role: Cilium

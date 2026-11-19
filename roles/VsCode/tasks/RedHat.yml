@@ -1,0 +1,25 @@
+---
+- name: Import Microsoft GPG key
+  ansible.builtin.rpm_key:
+    state: present
+    key: https://packages.microsoft.com/keys/microsoft.asc
+
+- name: Create VS Code repository file
+  ansible.builtin.copy:
+    dest: /etc/yum.repos.d/vscode.repo
+    mode: '0644'
+    content: |
+      [code]
+      name=Visual Studio Code
+      baseurl=https://packages.microsoft.com/yumrepos/vscode
+      enabled=1
+      autorefresh=1
+      type=rpm-md
+      gpgcheck=1
+      gpgkey=https://packages.microsoft.com/keys/microsoft.asc
+
+- name: Install VS Code
+  ansible.builtin.dnf:
+    name: code
+    state: present
+    update_cache: true

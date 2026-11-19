@@ -1,0 +1,6 @@
+---
+- name: Install libvirt Python dependencies
+  ansible.builtin.package:
+    name: "{{ libvirt_python_packages[ansible_facts['os_family']] }}"
+    state: present
+

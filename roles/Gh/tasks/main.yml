@@ -1,0 +1,16 @@
+---
+- name: Validate GitHub CLI package support
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] != "RedHat" or ansible_facts['distribution'] == "Fedora"
+    fail_msg: "GitHub CLI package setup supports Fedora rather than other RedHat-family distributions."
+
+- name: Configure GitHub CLI repository for Debian-family systems
+  ansible.builtin.include_tasks: Debian.yml
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Install GitHub CLI
+  ansible.builtin.package:
+    name: "{{ gh_package_names[ansible_facts['os_family']] }}"
+    state: present
+    update_cache: true

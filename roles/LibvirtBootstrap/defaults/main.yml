@@ -1,0 +1,14 @@
+---
+libvirt_python_packages:
+  Debian:
+    - python3-libvirt
+    - python3-lxml
+  RedHat:
+    - python3-libvirt
+    - python3-lxml
+  Suse:
+    - python3-libvirt
+    - python3-lxml
+  Archlinux:
+    - libvirt-python
+    - python-lxml

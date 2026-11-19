@@ -1,0 +1,84 @@
+---
+- name: Validate virtualization platform support
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ["Debian", "RedHat"]
+    fail_msg: "Virtualization setup is supported only on Debian- and RedHat-family systems."
+
+- name: Detect whether this system is a virtual machine guest
+  ansible.builtin.set_fact:
+    virtualization_is_guest: "{{ (ansible_facts['ansible_virtualization_role'] | default('unknown')) == 'guest' }}"
+
+- name: Set IOMMU parameter based on CPU vendor
+  ansible.builtin.set_fact:
+    iommu_args: "{{ 'intel_iommu=on iommu=pt' if 'GenuineIntel' in ansible_facts['processor'] else 'amd_iommu=on iommu=pt' }}"
+
+- name: Explain IOMMU configuration is skipped for a guest
+  ansible.builtin.debug:
+    msg: "Skipping IOMMU boot-parameter changes inside a guest VM; virtualization and network setup will continue."
+  when: virtualization_is_guest
+
+- name: Configure virtualization for Debian-family systems
+  ansible.builtin.include_tasks: Debian.yml
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Configure virtualization for RedHat-family systems
+  ansible.builtin.include_tasks: RedHat.yml
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Ensure libvirtd service is enabled and running
+  ansible.builtin.systemd:
+    name: libvirtd
+    state: started
+    enabled: true
+
+- name: Add user to libvirt group
+  ansible.builtin.user:
+    name: "{{ target_user }}"
+    groups: libvirt
+    append: true
+
+# --- Remove Default Libvirt Network (virbr0) ---
+- name: Check existing libvirt networks
+  community.libvirt.virt_net:
+    command: list_nets
+  register: libvirt_nets
+
+- name: Stop default libvirt network (virbr0)
+  community.libvirt.virt_net:
+    name: default
+    state: inactive
+  when: "'default' in libvirt_nets.list_nets"
+
+- name: Undefine default libvirt network (virbr0)
+  community.libvirt.virt_net:
+    name: default
+    command: undefine
+  when: "'default' in libvirt_nets.list_nets"
+
+# --- Configure Custom Libvirt Network (virbr8) ---
+- name: Define {{ bridge_name }} libvirt network
+  community.libvirt.virt_net:
+    name: "{{ bridge_name }}"
+    state: present
+    xml: |
+      <network>
+        <name>{{ bridge_name }}</name>
+        <forward mode='nat'/>
+        <bridge name='{{ bridge_name }}' stp='on' delay='0'/>
+        <ip address='{{ bridge_ip }}' netmask='{{ bridge_netmask }}'>
+          <dhcp>
+            <range start='{{ dhcp_start }}' end='{{ dhcp_end }}'/>
+          </dhcp>
+        </ip>
+      </network>
+
+- name: Ensure {{ bridge_name }} is active
+  community.libvirt.virt_net:
+    name: "{{ bridge_name }}"
+    state: active
+
+- name: Ensure {{ bridge_name }} is set to autostart
+  community.libvirt.virt_net:
+    name: "{{ bridge_name }}"
+    autostart: true
