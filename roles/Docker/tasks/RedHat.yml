@@ -13,6 +13,7 @@
       - docker-engine-selinux
       - docker-engine
     state: absent
+  ignore_errors: true
 
 - name: Add official Docker repository
   ansible.builtin.copy:
