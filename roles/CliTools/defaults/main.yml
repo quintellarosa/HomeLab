@@ -1,6 +1,0 @@
----
-cli_tools_packages:
-  - curl
-  - vim
-  - git
-  - tar

@@ -1,0 +1,53 @@
+---
+- name: Validate PostgreSQL platform support
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ["Debian", "RedHat"]
+    fail_msg: "PostgreSQL setup is supported only on Debian- and RedHat-family systems."
+
+- name: Calculate the libvirt bridge network
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - "import ipaddress, sys; print(ipaddress.IPv4Network(f'{sys.argv[1]}/{sys.argv[2]}', strict=False))"
+      - "{{ bridge.ip }}"
+      - "{{ bridge.netmask }}"
+  register: postgresql_bridge_network
+  changed_when: false
+
+- name: Combine bridge and additional client networks
+  ansible.builtin.set_fact:
+    postgresql_client_networks: >-
+      {{ ([postgresql_bridge_network.stdout] + postgresql_additional_client_networks) | unique | list }}
+
+- name: Configure PostgreSQL for Debian-family systems
+  ansible.builtin.include_tasks: Debian.yml
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Configure PostgreSQL for RedHat-family systems
+  ansible.builtin.include_tasks: RedHat.yml
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Ensure PostgreSQL is enabled and running
+  ansible.builtin.systemd:
+    name: postgresql
+    state: started
+    enabled: true
+
+- name: Listen on all interfaces for bridge-network connections
+  ansible.builtin.lineinfile:
+    path: "{{ item }}"
+    regexp: '^\s*#?\s*listen_addresses\s*='
+    line: "listen_addresses = '*'"
+  loop: "{{ postgresql_config_files }}"
+  notify: Restart PostgreSQL
+
+- name: Allow password-authenticated PostgreSQL connections from client networks
+  ansible.builtin.lineinfile:
+    path: "{{ item.0 }}"
+    regexp: '^host\s+all\s+all\s+{{ item.1 | regex_escape }}\s+'
+    line: "host all all {{ item.1 }} scram-sha-256"
+    insertafter: EOF
+  loop: "{{ postgresql_hba_files | product(postgresql_client_networks) | list }}"
+  notify: Restart PostgreSQL

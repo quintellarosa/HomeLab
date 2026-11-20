@@ -1,0 +1,49 @@
+---
+- name: Install PostgreSQL server
+  ansible.builtin.dnf:
+    name: postgresql-server
+    state: present
+
+- name: Initialize the PostgreSQL database if needed
+  ansible.builtin.command:
+    cmd: postgresql-setup --initdb
+    creates: /var/lib/pgsql/data/PG_VERSION
+
+- name: Set PostgreSQL configuration file paths
+  ansible.builtin.set_fact:
+    postgresql_config_files:
+      - /var/lib/pgsql/data/postgresql.conf
+    postgresql_hba_files:
+      - /var/lib/pgsql/data/pg_hba.conf
+
+- name: Install firewalld
+  ansible.builtin.dnf:
+    name: firewalld
+    state: present
+
+- name: Ensure firewalld is enabled and running
+  ansible.builtin.systemd:
+    name: firewalld
+    state: started
+    enabled: true
+
+- name: Allow PostgreSQL from the libvirt bridge network in firewalld
+  ansible.posix.firewalld:
+    zone: libvirt
+    rich_rule: >-
+      rule family="ipv4" source address="{{ postgresql_bridge_network.stdout }}"
+      port port="{{ postgresql_port }}" protocol="tcp" accept
+    permanent: true
+    immediate: true
+    state: enabled
+
+- name: Allow PostgreSQL from additional client networks in firewalld
+  ansible.posix.firewalld:
+    zone: trusted
+    rich_rule: >-
+      rule family="ipv4" source address="{{ item }}"
+      port port="{{ postgresql_port }}" protocol="tcp" accept
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ postgresql_additional_client_networks }}"

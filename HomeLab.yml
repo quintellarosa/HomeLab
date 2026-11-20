@@ -1,7 +1,6 @@
 ---
-- name: Homelab Workstation Setup
-  hosts: localhost
-  connection: local
+- name: HomeLab Server Setup
+  hosts: HomeLab
   become: true
   roles:
     - role: SystemUpdate
@@ -9,8 +8,13 @@
     - role: Gh
     - role: GoogleChrome
     - role: VsCode
-    - role: LibvirtBootstrap
     - role: Virtualization
+    - role: virbr8
     - role: Docker
     - role: Kubernetes
+    - role: PostgreSQL
+      vars:
+        postgresql_additional_client_networks:
+          - "{{ kubernetes.pod_network_cidr }}"
     - role: Cilium
+    #- role: AWX

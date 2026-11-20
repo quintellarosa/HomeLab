@@ -25,7 +25,7 @@
         permanent: true
         immediate: true
         state: enabled
-      loop: "{{ k8s_firewall_ports }}"
+      loop: "{{ kubernetes.firewall_ports }}"
 
     - name: Enable masquerading on default zone so pods can reach the internet
       ansible.posix.firewalld:
@@ -54,10 +54,10 @@
     content: |
       [kubernetes]
       name=Kubernetes
-      baseurl=https://pkgs.k8s.io/core:/stable:/{{ k8s_version }}/rpm/
+      baseurl=https://pkgs.k8s.io/core:/stable:/{{ kubernetes.version }}/rpm/
       enabled=1
       gpgcheck=1
-      gpgkey=https://pkgs.k8s.io/core:/stable:/{{ k8s_version }}/rpm/repodata/repomd.xml.key
+      gpgkey=https://pkgs.k8s.io/core:/stable:/{{ kubernetes.version }}/rpm/repodata/repomd.xml.key
       exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
 
 - name: Install kubelet, kubeadm, and kubectl

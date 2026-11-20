@@ -2,7 +2,7 @@
 - name: Validate GitHub CLI repository architecture
   ansible.builtin.assert:
     that:
-      - ansible_facts['architecture'] in gh_apt_architectures
+      - architecture in gh_apt_architectures
     fail_msg: "The GitHub CLI APT repository does not support this architecture."
 
 - name: Ensure APT keyring directory exists
@@ -29,6 +29,6 @@
     uris: https://cli.github.com/packages
     suites: stable
     components: main
-    architectures: "{{ gh_apt_architectures[ansible_facts['architecture']] }}"
+    architectures: "{{ gh_apt_architectures[architecture] }}"
     signed_by: /etc/apt/keyrings/githubcli-archive-keyring.gpg
     state: present

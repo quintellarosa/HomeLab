@@ -3,7 +3,7 @@
   ansible.builtin.assert:
     that:
       - ansible_facts['os_family'] == "Debian" or (ansible_facts['os_family'] == "RedHat" and ansible_facts['distribution'] == "Fedora")
-      - ansible_facts['architecture'] in ["x86_64", "aarch64"]
+      - architecture in ["x86_64", "aarch64"]
     fail_msg: >-
       Docker installation is supported only on Debian-family systems and Fedora
       with x86_64 or aarch64 architecture.

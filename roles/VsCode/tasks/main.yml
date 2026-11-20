@@ -2,8 +2,8 @@
 - name: Validate VS Code platform support
   ansible.builtin.assert:
     that:
-      - (ansible_facts['os_family'] == "Debian" and ansible_facts['architecture'] in ["x86_64", "aarch64", "armv7l"])
-        or (ansible_facts['os_family'] == "RedHat" and ansible_facts['architecture'] in ["x86_64", "aarch64"])
+      - (ansible_facts['os_family'] == "Debian" and architecture in ["x86_64", "aarch64", "armv7l"])
+        or (ansible_facts['os_family'] == "RedHat" and architecture in ["x86_64", "aarch64"])
     fail_msg: "VS Code repository setup is supported only on Debian- and RedHat-family systems."
 
 - name: Configure VS Code repository for RedHat-family systems

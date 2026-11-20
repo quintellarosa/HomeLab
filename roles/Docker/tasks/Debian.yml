@@ -23,6 +23,6 @@
     uris: "https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}"
     suites: "{{ ansible_facts['distribution_release'] }}"
     components: stable
-    architectures: "{{ docker_apt_architectures[ansible_facts['architecture']] }}"
+    architectures: "{{ architecture_alias }}"
     signed_by: /etc/apt/keyrings/docker.asc
     state: present

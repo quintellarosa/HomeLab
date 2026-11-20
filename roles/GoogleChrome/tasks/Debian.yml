@@ -23,6 +23,6 @@
     uris: https://dl.google.com/linux/chrome/deb/
     suites: stable
     components: main
-    architectures: amd64
+    architectures: "{{ architecture | replace('x86_64', 'amd64') }}"
     signed_by: /etc/apt/keyrings/google-chrome.asc
     state: present

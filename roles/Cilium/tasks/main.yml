@@ -2,7 +2,7 @@
 - name: Validate Cilium CLI architecture support
   ansible.builtin.assert:
     that:
-      - ansible_facts['architecture'] in ["x86_64", "aarch64"]
+      - architecture in ["x86_64", "aarch64"]
     fail_msg: "The Cilium CLI role supports only x86_64 and aarch64."
 
 - name: Check whether Cilium CLI is installed
@@ -19,9 +19,9 @@
 
 - name: Download verified Cilium CLI archive
   ansible.builtin.get_url:
-    url: "https://github.com/cilium/cilium-cli/releases/download/{{ cilium_cli_version }}/cilium-linux-{{ cilium_architecture_aliases[ansible_facts['architecture']] }}.tar.gz"
-    dest: "/var/tmp/cilium-cli-{{ cilium_cli_version }}-{{ ansible_facts['architecture'] }}.tar.gz"
-    checksum: "{{ cilium_cli_archive_checksums[ansible_facts['architecture']] }}"
+    url: "https://github.com/cilium/cilium-cli/releases/download/{{ cilium_cli_version }}/cilium-linux-{{ architecture_alias }}.tar.gz"
+    dest: "/var/tmp/cilium-cli-{{ cilium_cli_version }}-{{ architecture }}.tar.gz"
+    checksum: "{{ cilium_cli_archive_checksums[architecture] }}"
     mode: '0644'
   when: >-
     not cilium_cli_binary.stat.exists or
@@ -29,7 +29,7 @@
 
 - name: Install Cilium CLI
   ansible.builtin.unarchive:
-    src: "/var/tmp/cilium-cli-{{ cilium_cli_version }}-{{ ansible_facts['architecture'] }}.tar.gz"
+    src: "/var/tmp/cilium-cli-{{ cilium_cli_version }}-{{ architecture }}.tar.gz"
     dest: /usr/local/bin
     remote_src: true
   when: >-
@@ -38,7 +38,7 @@
 
 - name: Remove downloaded Cilium CLI archive
   ansible.builtin.file:
-    path: "/var/tmp/cilium-cli-{{ cilium_cli_version }}-{{ ansible_facts['architecture'] }}.tar.gz"
+    path: "/var/tmp/cilium-cli-{{ cilium_cli_version }}-{{ architecture }}.tar.gz"
     state: absent
   when: >-
     not cilium_cli_binary.stat.exists or
@@ -57,8 +57,8 @@
   ansible.builtin.command:
     cmd: >
       cilium install
-      --set ipam.operator.clusterPoolIPv4PodCIDRList={{ cilium_pod_network_cidr }}
-      --set ipv4NativeRoutingCIDR={{ cilium_pod_network_cidr }}
+      --set ipam.operator.clusterPoolIPv4PodCIDRList={{ kubernetes.pod_network_cidr }}
+      --set ipv4NativeRoutingCIDR={{ kubernetes.pod_network_cidr }}
       --set operator.replicas=1
   environment:
     KUBECONFIG: /etc/kubernetes/admin.conf

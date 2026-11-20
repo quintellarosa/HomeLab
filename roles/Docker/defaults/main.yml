@@ -1,6 +1,0 @@
----
-target_user: "{{ lookup('env', 'SUDO_USER') | default(lookup('env', 'USER'), true) }}"
-
-docker_apt_architectures:
-  x86_64: amd64
-  aarch64: arm64

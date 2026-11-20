@@ -3,7 +3,7 @@
   ansible.builtin.assert:
     that:
       - ansible_facts['os_family'] in ["Debian", "RedHat"]
-      - ansible_facts['architecture'] in ["x86_64", "aarch64"]
+      - architecture in ["x86_64", "aarch64"]
     fail_msg: >-
       Kubernetes package setup is supported only on Debian- and RedHat-family
       systems with x86_64 or aarch64 architecture.
@@ -58,7 +58,7 @@
   when: ansible_facts['os_family'] == "Debian"
 
 # ------------------------------------------------------------------------------
-# 2. Bind Kubelet to virbr8 (192.168.8.200) & Wait for libvirtd on Boot
+# 2. Bind Kubelet to the configured libvirt bridge and wait for libvirtd on boot
 # ------------------------------------------------------------------------------
 - name: Create kubelet systemd drop-in directory
   ansible.builtin.file:
@@ -66,9 +66,9 @@
     state: directory
     mode: '0755'
 
-- name: Configure kubelet to bind to virbr8 IP and wait for libvirtd
+- name: Configure kubelet to bind to {{ bridge.name }} IP and wait for libvirtd
   ansible.builtin.copy:
-    dest: /etc/systemd/system/kubelet.service.d/20-virbr8.conf
+    dest: "/etc/systemd/system/kubelet.service.d/20-{{ bridge.name }}.conf"
     mode: '0644'
     content: |
       [Unit]
@@ -76,18 +76,12 @@
       Requires=libvirtd.service
 
       [Service]
-      Environment="KUBELET_EXTRA_ARGS=--node-ip={{ k8s_bind_ip }}"
-
-- name: Enable kubelet service
-  ansible.builtin.systemd:
-    name: kubelet
-    enabled: true
-    daemon_reload: true
+      Environment="KUBELET_EXTRA_ARGS=--node-ip={{ kubernetes.bind_ip }}"
 
 # ------------------------------------------------------------------------------
 # 3. Initialize Single-Node Cluster with kubeadm & nftables Mode
 # ------------------------------------------------------------------------------
-- name: Write kubeadm configuration file (nftables + virbr8)
+- name: Write kubeadm configuration file (nftables + {{ bridge.name }})
   ansible.builtin.copy:
     dest: /root/kubeadm-config.yaml
     mode: '0600'
@@ -95,19 +89,19 @@
       apiVersion: kubeadm.k8s.io/v1beta4
       kind: InitConfiguration
       localAPIEndpoint:
-        advertiseAddress: "{{ k8s_bind_ip }}"
+        advertiseAddress: "{{ kubernetes.bind_ip }}"
         bindPort: 6443
       nodeRegistration:
         criSocket: unix:///var/run/containerd/containerd.sock
         kubeletExtraArgs:
           - name: node-ip
-            value: "{{ k8s_bind_ip }}"
+            value: "{{ kubernetes.bind_ip }}"
       ---
       apiVersion: kubeadm.k8s.io/v1beta4
       kind: ClusterConfiguration
       networking:
-        podSubnet: "{{ k8s_pod_network_cidr }}"
-        serviceSubnet: "{{ k8s_service_cidr }}"
+        podSubnet: "{{ kubernetes.pod_network_cidr }}"
+        serviceSubnet: "{{ kubernetes.service_cidr }}"
       ---
       apiVersion: kubeproxy.config.k8s.io/v1alpha1
       kind: KubeProxyConfiguration
@@ -144,6 +138,13 @@
     name: containerd
     state: started
     enabled: true
+
+- name: Ensure kubelet is enabled and running
+  ansible.builtin.systemd:
+    name: kubelet
+    state: started
+    enabled: true
+    daemon_reload: true
 
 - name: Initialize Kubernetes cluster via kubeadm
   ansible.builtin.command:

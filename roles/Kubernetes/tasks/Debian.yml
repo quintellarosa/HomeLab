@@ -11,7 +11,7 @@
         rule: allow
         port: "{{ item.port | replace('-', ':') }}"
         proto: "{{ item.protocol }}"
-      loop: "{{ k8s_firewall_ports }}"
+      loop: "{{ kubernetes.firewall_ports }}"
 
     - name: Allow forwarded packets in UFW for pod internet access
       ansible.builtin.lineinfile:
@@ -32,7 +32,7 @@
 
 - name: Download Kubernetes GPG key
   ansible.builtin.get_url:
-    url: "https://pkgs.k8s.io/core:/stable:/{{ k8s_version }}/deb/Release.key"
+    url: "https://pkgs.k8s.io/core:/stable:/{{ kubernetes.version }}/deb/Release.key"
     dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
     mode: '0644'
 
@@ -40,7 +40,7 @@
   ansible.builtin.deb822_repository:
     name: kubernetes
     types: deb
-    uris: "https://pkgs.k8s.io/core:/stable:/{{ k8s_version }}/deb/"
+    uris: "https://pkgs.k8s.io/core:/stable:/{{ kubernetes.version }}/deb/"
     suites: /
     signed_by: /etc/apt/keyrings/kubernetes-apt-keyring.asc
     state: present
