@@ -1,6 +1,0 @@
----
-
-- name: Install core CLI tools
-  ansible.builtin.package:
-    name: "{{ cli_tools }}"
-    state: present
