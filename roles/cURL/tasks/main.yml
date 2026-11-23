@@ -1,0 +1,6 @@
+---
+
+- name: Install cURL
+  ansible.builtin.package:
+    name: curl
+    state: present

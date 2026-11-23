@@ -1,0 +1,42 @@
+---
+- name: Install PostgreSQL server
+  ansible.builtin.zypper:
+    name: postgresql-server
+    state: present
+    update_cache: true
+
+- name: Ensure PostgreSQL data directory exists
+  ansible.builtin.file:
+    path: /var/lib/pgsql/data
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: '0700'
+
+- name: Initialize the PostgreSQL database if needed
+  ansible.builtin.command:
+    argv:
+      - initdb
+      - --pgdata=/var/lib/pgsql/data
+    creates: /var/lib/pgsql/data/PG_VERSION
+  become_user: postgres
+
+- name: Set PostgreSQL configuration file paths
+  ansible.builtin.set_fact:
+    postgresql_config_files:
+      - /var/lib/pgsql/data/postgresql.conf
+    postgresql_hba_files:
+      - /var/lib/pgsql/data/pg_hba.conf
+
+- name: Gather service facts for firewall detection
+  ansible.builtin.service_facts:
+
+- name: Allow PostgreSQL from the host network in firewalld
+  ansible.posix.firewalld:
+    rich_rule: >-
+      rule family="ipv4" source address="{{ postgresql_host_network }}"
+      port port="{{ postgresql.port }}" protocol="tcp" accept
+    permanent: true
+    immediate: true
+    state: enabled
+  when: ansible_facts['services'].get('firewalld.service', {}).get('state') == 'running'

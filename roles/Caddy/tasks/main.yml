@@ -1,0 +1,24 @@
+---
+- name: Validate Caddy platform support
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ["Debian", "RedHat", "Suse"]
+    fail_msg: "Caddy installation supports Debian, RedHat, and SUSE systems."
+
+- name: Install Caddy on Debian-family systems
+  ansible.builtin.include_tasks: Debian.yml
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Install Caddy on RedHat-family systems
+  ansible.builtin.include_tasks: RedHat.yml
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Install Caddy on SUSE-family systems
+  ansible.builtin.include_tasks: SUSE.yml
+  when: ansible_facts['os_family'] == "Suse"
+
+- name: Ensure Caddy is enabled and running
+  ansible.builtin.systemd:
+    name: caddy
+    state: started
+    enabled: true

@@ -1,0 +1,20 @@
+---
+- name: Validate VS Code platform support
+  ansible.builtin.assert:
+    that:
+      - (ansible_facts['os_family'] == "Debian" and ansible_facts['architecture'] in ["x86_64", "aarch64", "armv7l"])
+        or (ansible_facts['os_family'] in ["RedHat", "Suse"] and ansible_facts['architecture'] in ["x86_64", "aarch64"])
+        
+    fail_msg: "VS Code installation supports Debian, RedHat, and SUSE systems."
+
+- name: Configure VS Code repository for RedHat-family systems
+  ansible.builtin.include_tasks: RedHat.yml
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Configure VS Code repository for Debian-family systems
+  ansible.builtin.include_tasks: Debian.yml
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Configure VS Code repository for SUSE-family systems
+  ansible.builtin.include_tasks: SUSE.yml
+  when: ansible_facts['os_family'] == "Suse"

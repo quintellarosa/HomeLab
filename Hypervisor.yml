@@ -1,0 +1,9 @@
+---
+- name: Hypervisor Setup
+  hosts: Hypervisors
+  become: true
+  roles:
+    - role: SystemUpdate
+    - role: Vim
+    - role: cURL
+    - role: Virtualization

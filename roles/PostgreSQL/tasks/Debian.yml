@@ -1,0 +1,44 @@
+---
+- name: Install PostgreSQL
+  ansible.builtin.apt:
+    name: postgresql
+    state: present
+    update_cache: true
+
+- name: Find PostgreSQL server configuration files
+  ansible.builtin.find:
+    paths: /etc/postgresql
+    patterns: postgresql.conf
+    recurse: true
+  register: postgresql_config_search
+
+- name: Find PostgreSQL client authentication files
+  ansible.builtin.find:
+    paths: /etc/postgresql
+    patterns: pg_hba.conf
+    recurse: true
+  register: postgresql_hba_search
+
+- name: Verify PostgreSQL configuration files were found
+  ansible.builtin.assert:
+    that:
+      - postgresql_config_search.matched > 0
+      - postgresql_hba_search.matched > 0
+    fail_msg: "The PostgreSQL package is installed, but its configuration files were not found."
+
+- name: Set PostgreSQL configuration file paths
+  ansible.builtin.set_fact:
+    postgresql_config_files: "{{ postgresql_config_search.files | map(attribute='path') | list }}"
+    postgresql_hba_files: "{{ postgresql_hba_search.files | map(attribute='path') | list }}"
+
+- name: Gather installed package facts for firewall detection
+  ansible.builtin.package_facts:
+    manager: auto
+
+- name: Allow PostgreSQL from the host network in UFW
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ postgresql_host_network }}"
+    port: "{{ postgresql.port }}"
+    proto: tcp
+  when: "'ufw' in ansible_facts['packages']"

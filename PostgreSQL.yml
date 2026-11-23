@@ -1,0 +1,9 @@
+---
+- name: PostgreSQL Setup
+  hosts: PostgreSQL
+  become: true
+  roles:
+    - role: SystemUpdate
+    - role: Vim
+    - role: cURL
+    - role: PostgreSQL

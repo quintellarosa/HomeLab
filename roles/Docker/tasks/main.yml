@@ -1,0 +1,71 @@
+- name: Configure Docker repository for Debian-family systems
+  ansible.builtin.include_tasks: Debian.yml
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Configure Docker repository for RedHat-family systems
+  ansible.builtin.include_tasks: RedHat.yml
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Validate Docker platform support
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ["Debian", "RedHat", "Suse"]
+    fail_msg: "Docker setup supports Debian, RedHat, and SUSE systems."
+
+- name: Install Docker Engine and containerd
+  ansible.builtin.package:
+    name: "{{ docker_engine_packages[ansible_facts['os_family']] }}"
+    state: present
+    update_cache: true
+
+- name: Ensure containerd configuration directory exists
+  ansible.builtin.file:
+    path: /etc/containerd
+    state: directory
+    mode: '0755'
+
+- name: Generate default containerd configuration
+  ansible.builtin.shell: containerd config default > /etc/containerd/config.toml
+  args:
+    creates: /etc/containerd/config.toml
+  register: docker_containerd_default_config
+
+- name: Enable SystemdCgroup in containerd
+  ansible.builtin.replace:
+    path: /etc/containerd/config.toml
+    regexp: 'SystemdCgroup = false'
+    replace: 'SystemdCgroup = true'
+  register: docker_containerd_systemd_cgroup
+
+- name: Restart containerd when its configuration changed
+  ansible.builtin.systemd:
+    name: containerd
+    state: restarted
+    enabled: true
+  when: docker_containerd_default_config.changed or docker_containerd_systemd_cgroup.changed
+
+- name: Ensure Docker and containerd services are enabled and started
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - containerd
+    - docker
+
+- name: Ensure Docker group exists
+  ansible.builtin.group:
+    name: docker
+    state: present
+
+- name: Add target user to Docker group
+  ansible.builtin.user:
+    name: "{{ target_user }}"
+    groups: docker
+    append: true
+  register: docker_group_add
+
+- name: Notify target user that a new login is required for Docker group access
+  ansible.builtin.debug:
+    msg: "Log out and back in as {{ target_user }} for Docker group membership to take effect."
+  when: docker_group_add.changed

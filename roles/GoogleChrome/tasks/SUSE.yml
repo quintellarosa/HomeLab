@@ -1,0 +1,13 @@
+---
+- name: Import Google Linux signing key
+  ansible.builtin.rpm_key:
+    state: present
+    key: https://dl.google.com/linux/linux_signing_key.pub
+
+- name: Add Google Chrome repository on SUSE-family systems
+  community.general.zypper_repository:
+    name: google-chrome
+    repo: https://dl.google.com/linux/chrome/rpm/stable/x86_64
+    enabled: true
+    auto_import_keys: true
+    state: present

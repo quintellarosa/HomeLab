@@ -1,0 +1,13 @@
+---
+- name: Workstation Setup
+  hosts: Workstation
+  become: true
+  roles:
+    - role: SystemUpdate
+    - role: Vim
+    - role: cURL
+    - role: Git
+    - role: Gh
+    - role: GoogleChrome
+    - role: VsCode
+    - role: Docker

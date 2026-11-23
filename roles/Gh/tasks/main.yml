@@ -1,0 +1,18 @@
+---
+- name: Configure GitHub CLI repository for Debian-family systems
+  ansible.builtin.include_tasks: Debian.yml
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Configure GitHub CLI repository for RedHat-family systems
+  ansible.builtin.include_tasks: RedHat.yml
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Configure GitHub CLI repository for SUSE-family systems
+  ansible.builtin.include_tasks: SUSE.yml
+  when: ansible_facts['os_family'] == "Suse"
+
+- name: Install GitHub CLI
+  ansible.builtin.package:
+    name: gh
+    state: present
+    update_cache: true

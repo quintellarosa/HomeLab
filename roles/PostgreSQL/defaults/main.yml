@@ -1,0 +1,3 @@
+---
+postgresql:
+  port: 5432

@@ -1,0 +1,16 @@
+---
+- name: Install Caddy COPR prerequisites
+  ansible.builtin.package:
+    name:
+      - "{{ 'dnf5-plugins' if ansible_facts['distribution'] == 'Fedora' else 'dnf-plugins-core' }}"
+    state: present
+
+- name: Enable the official Caddy COPR repository
+  community.general.copr:
+    name: "@caddy/caddy"
+    state: enabled
+
+- name: Install Caddy on RedHat-family systems
+  ansible.builtin.dnf:
+    name: caddy
+    state: present

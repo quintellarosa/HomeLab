@@ -1,0 +1,19 @@
+---
+- name: Import Microsoft GPG key
+  ansible.builtin.rpm_key:
+    state: present
+    key: https://packages.microsoft.com/keys/microsoft.asc
+
+- name: Add VS Code repository on SUSE-family systems
+  community.general.zypper_repository:
+    name: vscode
+    repo: https://packages.microsoft.com/yumrepos/vscode
+    enabled: true
+    auto_import_keys: true
+    state: present
+
+- name: Install VS Code on SUSE
+  community.general.zypper:
+    name: code
+    state: present
+    update_cache: true
