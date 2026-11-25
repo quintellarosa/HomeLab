@@ -1,0 +1,16 @@
+---
+target_user: "{{ ansible_user | default(lookup('env', 'USER'), true) }}"
+awx_operator_latest_release_api: "https://api.github.com/repos/ansible/awx-operator/releases/latest"
+awx_operator_kustomize_base: "https://github.com/ansible/awx-operator/config/default"
+awx_operator_rbac_proxy_source_image: "gcr.io/kubebuilder/kube-rbac-proxy:v0.15.0"
+awx_operator_rbac_proxy_image: "quay.io/brancz/kube-rbac-proxy:v0.15.0"
+awx_operator_namespace: "awx"
+awx_operator_kubeconfig: "{{ ansible_facts['getent_passwd'][target_user][4] }}/.kube/config"
+awx_instance_name: "awx"
+awx_postgres_configuration_secret: "{{ awx_instance_name }}-postgres-configuration"
+awx_python_virtualenv: "/opt/awx/venv"
+awx_python_packages:
+  - kubernetes
+  - PyYAML
+  - jsonpatch
+  - psycopg2-binary

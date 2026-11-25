@@ -1,0 +1,11 @@
+---
+- name: Backstage Setup
+  hosts: Backstage
+  become: true
+  roles:
+    - role: SystemUpdate
+    - role: Vim
+    - role: cURL
+    - role: Git
+    - role: Caddy
+    - role: Backstage

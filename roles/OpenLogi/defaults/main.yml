@@ -1,0 +1,7 @@
+---
+openlogi:
+  version: "0.1.0"
+  release_tag: "v0.1.0"
+  release_base_url: "https://github.com/mohin7/openlogi/releases/download"
+  debian_package_url: "{{ openlogi.release_base_url }}/{{ openlogi.release_tag }}/openlogi_{{ openlogi.version }}_amd64.deb"
+  redhat_package_url: "{{ openlogi.release_base_url }}/{{ openlogi.release_tag }}/openlogi-{{ openlogi.version }}-1.x86_64.rpm"

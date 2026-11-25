@@ -1,0 +1,13 @@
+---
+- name: Download OpenLogi RedHat package
+  ansible.builtin.get_url:
+    url: "{{ openlogi.redhat_package_url }}"
+    dest: "/var/tmp/openlogi-{{ openlogi.version }}-1.x86_64.rpm"
+    mode: '0644'
+  register: openlogi_redhat_package
+
+- name: Install OpenLogi RedHat package
+  ansible.builtin.dnf:
+    name: "{{ openlogi_redhat_package.dest }}"
+    state: present
+    disable_gpg_check: true

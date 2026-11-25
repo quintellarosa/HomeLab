@@ -5,6 +5,32 @@
       - ansible_facts['os_family'] in ["Debian", "RedHat", "Suse"]
     fail_msg: "Caddy installation supports Debian, RedHat, and SUSE systems."
 
+- name: Create Caddy configuration directory
+  ansible.builtin.file:
+    path: /etc/caddy
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: caddy.sites | default([]) | length > 0
+
+- name: Configure Caddy sites
+  ansible.builtin.copy:
+    dest: /etc/caddy/Caddyfile
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      {% for site in caddy.sites %}
+      {{ site.address }} {
+        tls internal
+        reverse_proxy {{ site.upstream }}
+      }
+
+      {% endfor %}
+  when: caddy.sites | default([]) | length > 0
+  notify: Reload Caddy
+
 - name: Install Caddy on Debian-family systems
   ansible.builtin.include_tasks: Debian.yml
   when: ansible_facts['os_family'] == "Debian"
@@ -17,8 +43,39 @@
   ansible.builtin.include_tasks: SUSE.yml
   when: ansible_facts['os_family'] == "Suse"
 
+- name: Validate Caddy configuration
+  ansible.builtin.command:
+    argv:
+      - "{{ '/usr/local/bin/caddy' if ansible_facts['os_family'] == 'RedHat' else 'caddy' }}"
+      - validate
+      - --config
+      - /etc/caddy/Caddyfile
+  changed_when: false
+  when: caddy.sites | default([]) | length > 0
+
 - name: Ensure Caddy is enabled and running
   ansible.builtin.systemd:
     name: caddy
     state: started
     enabled: true
+
+- name: Allow HTTPS in UFW
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop:
+    - "80"
+    - "443"
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Allow HTTPS in firewalld
+  ansible.posix.firewalld:
+    port: "{{ item }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - "80"
+    - "443"
+  when: ansible_facts['os_family'] in ["RedHat", "Suse"]

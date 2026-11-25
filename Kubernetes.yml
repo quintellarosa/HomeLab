@@ -1,0 +1,10 @@
+---
+- name: Kubernetes Setup
+  hosts: Kubernetes
+  become: true
+  roles:
+    - role: SystemUpdate
+    - role: Vim
+    - role: cURL
+    - role: Kubernetes
+    - role: Cilium

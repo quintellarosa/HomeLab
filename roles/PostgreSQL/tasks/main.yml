@@ -17,6 +17,15 @@
 - name: Set the PostgreSQL client network
   ansible.builtin.set_fact:
     postgresql_host_network: "{{ ansible_facts['default_ipv4']['network'] }}/{{ ansible_facts['default_ipv4']['prefix'] }}"
+    postgresql_allowed_networks: >-
+      {{
+        (
+          [ansible_facts['default_ipv4']['network'] ~ '/' ~ ansible_facts['default_ipv4']['prefix']]
+          + (postgresql.client_networks | default([]))
+        )
+        | unique
+        | list
+      }}
 
 - name: Configure PostgreSQL for Debian-family systems
   ansible.builtin.include_tasks: Debian.yml
@@ -46,13 +55,13 @@
   loop: "{{ postgresql_config_files }}"
   notify: Restart PostgreSQL
 
-- name: Allow password-authenticated clients from the host network
+- name: Allow password-authenticated clients from configured networks
   ansible.builtin.lineinfile:
-    path: "{{ item }}"
-    regexp: "^host\\s+all\\s+all\\s+{{ postgresql_host_network | regex_escape }}\\s+"
-    line: "host all all {{ postgresql_host_network }} scram-sha-256"
+    path: "{{ item.0 }}"
+    regexp: "^host\\s+all\\s+all\\s+{{ item.1 | regex_escape }}\\s+"
+    line: "host all all {{ item.1 }} scram-sha-256"
     insertbefore: '^host'
-  loop: "{{ postgresql_hba_files }}"
+  loop: "{{ postgresql_hba_files | product(postgresql_allowed_networks) | list }}"
   notify: Restart PostgreSQL
 
 - name: Ensure PostgreSQL is enabled and running

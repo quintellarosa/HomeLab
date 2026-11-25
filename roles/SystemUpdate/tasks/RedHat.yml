@@ -1,4 +1,9 @@
 ---
+- name: Remove stale Caddy RPM repository configuration
+  ansible.builtin.file:
+    path: /etc/yum.repos.d/caddy-stable.repo
+    state: absent
+
 - name: Update all packages
   ansible.builtin.dnf:
     name: "*"

@@ -1,0 +1,258 @@
+---
+- name: Validate Kubernetes platform support
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ["Debian", "RedHat", "Suse"]
+      - ansible_facts['architecture'] in ["x86_64", "aarch64"]
+    fail_msg: >-
+      Kubernetes package setup is supported only on Debian, RedHat, and SUSE
+      systems with x86_64 or aarch64 architecture.
+
+- name: Verify Kubernetes configuration
+  ansible.builtin.assert:
+    that:
+      - kubernetes.version is defined
+      - kubernetes.pod_network_cidr is defined
+      - kubernetes.service_cidr is defined
+      - kubernetes.firewall_ports is defined
+    fail_msg: "Kubernetes requires version, pod_network_cidr, service_cidr, and firewall_ports variables."
+
+- name: Resolve Kubernetes interface binding
+  block:
+    - name: Verify requested network interface exists
+      ansible.builtin.assert:
+        that:
+          - interface.name in ansible_facts['interfaces']
+        fail_msg: "The requested Kubernetes interface '{{ interface.name }}' does not exist."
+      when: interface is defined and interface.name is defined
+
+    - name: Read requested interface address
+      ansible.builtin.set_fact:
+        kubernetes_bind_ip: "{{ ansible_facts.get(interface.name, {}).get('ipv4', {}).get('address', '') }}"
+      when:
+        - interface is defined
+        - interface.name is defined
+
+    - name: Verify requested interface has an IPv4 address
+      ansible.builtin.assert:
+        that:
+          - kubernetes_bind_ip is defined
+          - kubernetes_bind_ip | length > 0
+        fail_msg: "The requested Kubernetes interface '{{ interface.name }}' has no IPv4 address."
+      when: interface is defined and interface.name is defined
+
+    - name: Use the default IPv4 interface
+      ansible.builtin.set_fact:
+        kubernetes_bind_ip: "{{ ansible_facts['default_ipv4']['address'] }}"
+      when: interface is not defined or interface.name is not defined
+
+- name: Verify Kubernetes bind address
+  ansible.builtin.assert:
+    that:
+      - kubernetes_bind_ip is match('^(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(?:\\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){3}$')
+    fail_msg: "Could not determine a valid IPv4 address for Kubernetes."
+
+# ------------------------------------------------------------------------------
+# 1. Kernel Modules, Sysctl & Swap Off
+# ------------------------------------------------------------------------------
+- name: Load required kernel modules for Kubernetes
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - overlay
+    - br_netfilter
+
+- name: Persist kernel modules on boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    mode: '0644'
+    content: |
+      overlay
+      br_netfilter
+
+- name: Configure sysctl parameters for Kubernetes networking and pod internet access
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-kubernetes-cri.conf
+    reload: true
+  loop:
+    - { key: 'net.bridge.bridge-nf-call-iptables', value: '1' }
+    - { key: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+    - { key: 'net.ipv4.ip_forward', value: '1' }
+
+- name: Disable swap immediately
+  ansible.builtin.command: swapoff -a
+  when: ansible_facts['swaptotal_mb'] > 0
+  changed_when: true
+
+- name: Disable swap in /etc/fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#].*?\sswap\s+.*)$'
+    replace: '# \1'
+
+- name: Configure Kubernetes for RedHat-family systems
+  ansible.builtin.include_tasks: RedHat.yml
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Configure Kubernetes for Debian-family systems
+  ansible.builtin.include_tasks: Debian.yml
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Configure Kubernetes for SUSE-family systems
+  ansible.builtin.include_tasks: SUSE.yml
+  when: ansible_facts['os_family'] == "Suse"
+
+# ------------------------------------------------------------------------------
+# 2. Bind Kubelet to the configured network interface and wait for containerd on boot
+# ------------------------------------------------------------------------------
+- name: Create kubelet systemd drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/kubelet.service.d
+    state: directory
+    mode: '0755'
+
+- name: Configure kubelet to bind to {{ kubernetes_bind_ip }} and wait for containerd
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/kubelet.service.d/20-kubernetes-network.conf"
+    mode: '0644'
+    content: |
+      [Unit]
+      After=containerd.service
+      Wants=containerd.service
+
+      [Service]
+      Environment="KUBELET_EXTRA_ARGS=--node-ip={{ kubernetes_bind_ip }}"
+
+# ------------------------------------------------------------------------------
+# 3. Initialize Single-Node Cluster with kubeadm & nftables Mode
+# ------------------------------------------------------------------------------
+- name: Write kubeadm configuration file
+  ansible.builtin.copy:
+    dest: /root/kubeadm-config.yaml
+    mode: '0600'
+    content: |
+      apiVersion: kubeadm.k8s.io/v1beta4
+      kind: InitConfiguration
+      localAPIEndpoint:
+        advertiseAddress: "{{ kubernetes_bind_ip }}"
+        bindPort: 6443
+      nodeRegistration:
+        criSocket: unix:///var/run/containerd/containerd.sock
+        kubeletExtraArgs:
+          - name: node-ip
+            value: "{{ kubernetes_bind_ip }}"
+      ---
+      apiVersion: kubeadm.k8s.io/v1beta4
+      kind: ClusterConfiguration
+      networking:
+        podSubnet: "{{ kubernetes.pod_network_cidr }}"
+        serviceSubnet: "{{ kubernetes.service_cidr }}"
+      ---
+      apiVersion: kubeproxy.config.k8s.io/v1alpha1
+      kind: KubeProxyConfiguration
+      mode: "nftables"
+
+- name: Ensure containerd configuration directory exists
+  ansible.builtin.file:
+    path: /etc/containerd
+    state: directory
+    mode: '0755'
+
+- name: Read containerd default configuration
+  ansible.builtin.command:
+    argv:
+      - containerd
+      - config
+      - default
+  register: kubernetes_containerd_default_config_output
+  changed_when: false
+
+- name: Write containerd configuration
+  ansible.builtin.copy:
+    dest: /etc/containerd/config.toml
+    mode: '0644'
+    content: "{{ kubernetes_containerd_default_config_output.stdout }}\n"
+  register: kubernetes_containerd_default_config
+
+- name: Enable SystemdCgroup in containerd
+  ansible.builtin.replace:
+    path: /etc/containerd/config.toml
+    regexp: 'SystemdCgroup = false'
+    replace: 'SystemdCgroup = true'
+  register: kubernetes_containerd_systemd_cgroup
+
+- name: Restart containerd when its configuration changed
+  ansible.builtin.systemd:
+    name: containerd
+    state: restarted
+    enabled: true
+  when: kubernetes_containerd_default_config.changed or kubernetes_containerd_systemd_cgroup.changed
+
+- name: Ensure containerd is enabled and running
+  ansible.builtin.systemd:
+    name: containerd
+    state: started
+    enabled: true
+
+- name: Ensure kubelet is enabled and running
+  ansible.builtin.systemd:
+    name: kubelet
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Initialize Kubernetes cluster via kubeadm
+  ansible.builtin.command:
+    cmd: kubeadm init --config /root/kubeadm-config.yaml
+  args:
+    creates: /etc/kubernetes/admin.conf
+
+- name: Configure kubectl for root user
+  ansible.builtin.file:
+    path: /root/.kube
+    state: directory
+    mode: '0700'
+
+- name: Copy admin.conf to root kubeconfig
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /root/.kube/config
+    remote_src: true
+    mode: '0600'
+
+- name: Get target user home directory
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ target_user }}"
+
+- name: Configure kubectl directory for {{ target_user }}
+  ansible.builtin.file:
+    path: "{{ ansible_facts['getent_passwd'][target_user][4] }}/.kube"
+    state: directory
+    owner: "{{ target_user }}"
+    group: "{{ target_user }}"
+    mode: '0700'
+
+- name: Copy admin.conf to {{ target_user }} kubeconfig
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: "{{ ansible_facts['getent_passwd'][target_user][4] }}/.kube/config"
+    remote_src: true
+    owner: "{{ target_user }}"
+    group: "{{ target_user }}"
+    mode: '0600'
+
+- name: Allow scheduling pods on the single control-plane node
+  ansible.builtin.command:
+    cmd: kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: taint_result
+  failed_when:
+    - taint_result.rc != 0
+    - "'not found' not in taint_result.stderr"
+  changed_when: "'untainted' in taint_result.stdout"
+

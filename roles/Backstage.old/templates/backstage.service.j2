@@ -1,0 +1,17 @@
+[Unit]
+Description=Backstage
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ target_user }}
+WorkingDirectory={{ backstage.app.directory }}
+Environment=HOME={{ ansible_facts['getent_passwd'][target_user][4] }}
+Environment=PATH={{ backstage_node_directory }}/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart={{ backstage_node_directory }}/bin/corepack yarn start --config app-config.yaml --config app-config.local.yaml
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

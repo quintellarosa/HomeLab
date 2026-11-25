@@ -1,0 +1,19 @@
+---
+- name: Install Backstage Kubernetes Python prerequisites on SUSE
+  ansible.builtin.zypper:
+    name:
+      - python3-pip
+    state: present
+
+- name: Install Kubernetes Python client for Backstage
+  ansible.builtin.pip:
+    name:
+      - kubernetes
+      - PyYAML
+    virtualenv: /opt/backstage/venv
+    virtualenv_command: python3 -m venv
+    state: present
+
+- name: Use the Backstage Python virtualenv
+  ansible.builtin.set_fact:
+    ansible_python_interpreter: /opt/backstage/venv/bin/python

@@ -1,3 +1,6 @@
 ---
 postgresql:
   port: 5432
+  client_networks:
+    - "127.0.0.1/32"
+    - "10.244.0.0/16"

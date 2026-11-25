@@ -31,12 +31,13 @@
 - name: Gather service facts for firewall detection
   ansible.builtin.service_facts:
 
-- name: Allow PostgreSQL from the host network in firewalld
+- name: Allow PostgreSQL from configured client networks in firewalld
   ansible.posix.firewalld:
     rich_rule: >-
-      rule family="ipv4" source address="{{ postgresql_host_network }}"
+      rule family="ipv4" source address="{{ item }}"
       port port="{{ postgresql.port }}" protocol="tcp" accept
     permanent: true
     immediate: true
     state: enabled
+  loop: "{{ postgresql_allowed_networks }}"
   when: ansible_facts['services'].get('firewalld.service', {}).get('state') == 'running'

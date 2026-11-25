@@ -35,10 +35,11 @@
   ansible.builtin.package_facts:
     manager: auto
 
-- name: Allow PostgreSQL from the host network in UFW
+- name: Allow PostgreSQL from configured client networks in UFW
   community.general.ufw:
     rule: allow
-    from_ip: "{{ postgresql_host_network }}"
+    from_ip: "{{ item }}"
     port: "{{ postgresql.port }}"
     proto: tcp
+  loop: "{{ postgresql_allowed_networks }}"
   when: "'ufw' in ansible_facts['packages']"

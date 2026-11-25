@@ -1,0 +1,7 @@
+---
+- name: AWX Setup
+  hosts: AWX
+  become: true
+  roles:
+    - role: SystemUpdate
+    - role: AWX

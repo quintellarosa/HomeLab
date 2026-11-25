@@ -29,6 +29,73 @@ all:
           ansible_host:       LclLnxLabPSQL01.quintellarosa.home
 
     
+    Kubernetes:
+
+      hosts:
+
+        LclLnxLabK8sM01:
+          ansible_host:       LclLnxLabK8sM01.quintellarosa.home
+
+    AWX:
+
+      hosts:
+
+        LclLnxLabK8sM01:
+          ansible_host:       LclLnxLabK8sM01.quintellarosa.home
+
+      vars:
+        awx:
+          admin_user:         admin
+          admin_password:     admin
+          secret_key:         "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"    
+          postgresql:
+            host:             LclLnxLabPSQL01.quintellarosa.home
+            port:             5432
+            database:         awx
+            user:             awx
+            password:         awx
+
+    Backstage:
+
+      hosts:
+
+        LclLnxLabK8sM01:
+          ansible_host:       LclLnxLabK8sM01.quintellarosa.home
+
+      vars:
+        caddy:
+          sites:
+            - address: "192.168.122.41"
+              upstream: "http://127.0.0.1:30081"
+        backstage:
+          host:             LclLnxLabK8sM01.quintellarosa.home
+          namespace:        backstage
+          kubeconfig:       "/home/{{ ansible_user }}/.kube/config"
+          image:            ghcr.io/backstage/backstage:latest
+          replicas:         1
+          public_url:       https://192.168.122.41
+          nodeport:         30081
+          app:
+            name:             backstage
+            directory:        "/home/{{ ansible_user }}/backstage"
+            create_app_package: "@backstage/create-app@latest"
+          node:
+            minimum_version:  "24.15.0"
+          yarn:
+            version:          "4.4.1"
+          database:
+            name:             backstage
+            user:             backstage
+            password:         backstage
+            host:             LclLnxLabPSQL01.quintellarosa.home
+            port:             5432
+          frontend:
+            port:             3000
+          backend:
+            port:             7007
+
+
+    
     # Backstage:
 
     #   hosts:
@@ -105,23 +172,4 @@ all:
     #       ca_certificate: /etc/caddy/backstage-root.crt
 
 
-    # Kubernetes:
-
-    #   hosts:
-    #     LclLnxLabK8sM01:
-    #       ansible_host:
-
-    #     # Kubernetes configuration
-    #     kubernetes:
-    #       version: "v1.37"
-    #       pod_network_cidr: "10.244.0.0/16"
-    #       service_cidr: "10.96.0.0/12"
-    #       firewall_ports:
-    #         - { port: "6443",        protocol: tcp }
-    #         - { port: "2379-2380",   protocol: tcp }
-    #         - { port: "10250",       protocol: tcp }
-    #         - { port: "10259",       protocol: tcp }
-    #         - { port: "10257",       protocol: tcp }
-    #         - { port: "30000-32767", protocol: tcp }
-    #         - { port: "4240",        protocol: tcp }
-    #         - { port: "8472",        protocol: udp }
+   

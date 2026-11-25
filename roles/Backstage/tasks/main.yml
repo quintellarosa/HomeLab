@@ -1,0 +1,259 @@
+---
+- name: Validate Backstage Kubernetes platform support
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ["Debian", "RedHat", "Suse"]
+    fail_msg: "Backstage Kubernetes setup supports Debian, RedHat, and SUSE systems."
+
+- name: Validate Backstage Kubernetes configuration
+  ansible.builtin.assert:
+    that:
+      - backstage.host | length > 0
+      - backstage.namespace | length > 0
+      - backstage.kubeconfig | length > 0
+      - backstage.image | length > 0
+      - backstage.database.host | length > 0
+      - backstage.database.port | int >= 1
+      - backstage.database.name | length > 0
+      - backstage.database.user | length > 0
+      - backstage.database.password | length > 0
+    fail_msg: "Backstage requires host, namespace, kubeconfig, image, and external PostgreSQL variables."
+
+- name: Configure Backstage Kubernetes dependencies for Debian-family systems
+  ansible.builtin.include_tasks: Debian.yml
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Configure Backstage Kubernetes dependencies for RedHat-family systems
+  ansible.builtin.include_tasks: RedHat.yml
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Configure Backstage Kubernetes dependencies for SUSE-family systems
+  ansible.builtin.include_tasks: SUSE.yml
+  when: ansible_facts['os_family'] == "Suse"
+
+- name: Resolve the external PostgreSQL inventory host
+  ansible.builtin.set_fact:
+    backstage_postgres_target: "{{ (groups['PostgreSQL'] | default([]) | first) | default('') }}"
+
+- name: Require an external PostgreSQL inventory host
+  ansible.builtin.assert:
+    that:
+      - backstage_postgres_target | length > 0
+    fail_msg: "Backstage requires a host in the PostgreSQL inventory group."
+
+- name: Install PostgreSQL Python bindings on the external database host
+  ansible.builtin.package:
+    name: "{{ 'python3-psycopg2' }}"
+    state: present
+  delegate_to: "{{ backstage_postgres_target }}"
+  become: true
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+
+- name: Create the Backstage PostgreSQL role
+  community.postgresql.postgresql_user:
+    login_db: postgres
+    login_user: postgres
+    name: "{{ backstage.database.user }}"
+    password: "{{ backstage.database.password }}"
+    role_attr_flags: LOGIN,CREATEDB
+    state: present
+  delegate_to: "{{ backstage_postgres_target }}"
+  become: true
+  become_user: postgres
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  environment:
+    PGOPTIONS: "-c password_encryption=scram-sha-256"
+  no_log: true
+
+- name: Create the Backstage PostgreSQL database
+  community.postgresql.postgresql_db:
+    maintenance_db: postgres
+    login_user: postgres
+    db: "{{ backstage.database.name }}"
+    owner: "{{ backstage.database.user }}"
+    encoding: UTF-8
+    state: present
+  delegate_to: "{{ backstage_postgres_target }}"
+  become: true
+  become_user: postgres
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+
+- name: Verify the Kubernetes kubeconfig exists
+  ansible.builtin.stat:
+    path: "{{ backstage.kubeconfig }}"
+  register: backstage_kubeconfig
+
+- name: Require the Kubernetes kubeconfig
+  ansible.builtin.assert:
+    that:
+      - backstage_kubeconfig.stat.exists
+    fail_msg: "Kubernetes kubeconfig {{ backstage.kubeconfig }} is missing."
+
+- name: Create the Backstage namespace
+  kubernetes.core.k8s:
+    kubeconfig: "{{ backstage.kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ backstage.namespace }}"
+
+- name: Create the Backstage PostgreSQL secret
+  kubernetes.core.k8s:
+    kubeconfig: "{{ backstage.kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: backstage-postgresql
+        namespace: "{{ backstage.namespace }}"
+      type: Opaque
+      stringData:
+        host: "{{ backstage.database.host }}"
+        port: "{{ backstage.database.port | string }}"
+        database: "{{ backstage.database.name }}"
+        user: "{{ backstage.database.user }}"
+        password: "{{ backstage.database.password }}"
+  no_log: true
+
+- name: Create the Backstage ConfigMap
+  kubernetes.core.k8s:
+    kubeconfig: "{{ backstage.kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: backstage-app-config
+        namespace: "{{ backstage.namespace }}"
+      data:
+        app-config.production.yaml: |
+          app:
+            title: Backstage
+            baseUrl: "{{ backstage.public_url }}"
+          auth:
+            environment: production
+            providers:
+              guest:
+                dangerouslyAllowOutsideDevelopment: true
+          backend:
+            baseUrl: "{{ backstage.public_url }}"
+            listen:
+              host: 0.0.0.0
+              port: {{ backstage.backend.port }}
+            cors:
+              origin: "{{ backstage.public_url }}"
+              methods: [GET, HEAD, PATCH, POST, PUT, DELETE]
+              credentials: true
+            database:
+              client: pg
+              connection:
+                host: ${POSTGRES_HOST}
+                port: ${POSTGRES_PORT}
+                database: ${POSTGRES_DATABASE}
+                user: ${POSTGRES_USER}
+                password: ${POSTGRES_PASSWORD}
+
+- name: Deploy Backstage
+  kubernetes.core.k8s:
+    kubeconfig: "{{ backstage.kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: backstage
+        namespace: "{{ backstage.namespace }}"
+      spec:
+        replicas: "{{ backstage.replicas | int }}"
+        selector:
+          matchLabels:
+            app: backstage
+        template:
+          metadata:
+            labels:
+              app: backstage
+          spec:
+            containers:
+              - name: backstage
+                image: "{{ backstage.image }}"
+                ports:
+                  - name: http
+                    containerPort: "{{ backstage.backend.port | int }}"
+                env:
+                  - name: APP_CONFIG_app_baseUrl
+                    value: "{{ backstage.public_url }}"
+                  - name: APP_CONFIG_backend_baseUrl
+                    value: "{{ backstage.public_url }}"
+                  - name: POSTGRES_HOST
+                    valueFrom:
+                      secretKeyRef:
+                        name: backstage-postgresql
+                        key: host
+                  - name: POSTGRES_PORT
+                    valueFrom:
+                      secretKeyRef:
+                        name: backstage-postgresql
+                        key: port
+                  - name: POSTGRES_DATABASE
+                    valueFrom:
+                      secretKeyRef:
+                        name: backstage-postgresql
+                        key: database
+                  - name: POSTGRES_USER
+                    valueFrom:
+                      secretKeyRef:
+                        name: backstage-postgresql
+                        key: user
+                  - name: POSTGRES_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: backstage-postgresql
+                        key: password
+                volumeMounts:
+                  - name: app-config
+                    mountPath: /app/app-config.production.yaml
+                    subPath: app-config.production.yaml
+            volumes:
+              - name: app-config
+                configMap:
+                  name: backstage-app-config
+
+- name: Create the Backstage service
+  kubernetes.core.k8s:
+    kubeconfig: "{{ backstage.kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: backstage
+        namespace: "{{ backstage.namespace }}"
+      spec:
+        type: NodePort
+        selector:
+          app: backstage
+        ports:
+          - name: http
+            port: "{{ backstage.backend.port }}"
+            targetPort: http
+            nodePort: "{{ backstage.nodeport }}"
+
+- name: Wait for the Backstage deployment
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ backstage.kubeconfig }}"
+    api_version: apps/v1
+    kind: Deployment
+    name: backstage
+    namespace: "{{ backstage.namespace }}"
+  register: backstage_deployment
+  until: >-
+    backstage_deployment.resources | length > 0 and
+    (backstage_deployment.resources[0].status | default({})).availableReplicas | default(0) | int > 0
+  retries: 60
+  delay: 10

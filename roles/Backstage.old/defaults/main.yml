@@ -1,0 +1,22 @@
+---
+target_user: "{{ ansible_user | default(lookup('env', 'USER'), true) }}"
+
+backstage:
+  app:
+    name: backstage
+    directory: "/home/{{ target_user }}/backstage"
+    create_app_package: "@backstage/create-app@latest"
+  node:
+    minimum_version: "24.15.0"
+  yarn:
+    version: "4.4.1"
+  database:
+    name: backstage
+    user: backstage
+    password: backstage
+    host: "127.0.0.1"
+    port: 5432
+  frontend:
+    port: 3000
+  backend:
+    port: 7007

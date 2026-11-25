@@ -1,0 +1,162 @@
+---
+- name: Validate Backstage platform support
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ["Debian", "RedHat", "Suse"]
+      - ansible_facts['architecture'] in ["x86_64", "aarch64"]
+    fail_msg: "Backstage setup supports Debian, RedHat, and SUSE systems on x86_64 or aarch64."
+
+- name: Validate Backstage configuration
+  ansible.builtin.assert:
+    that:
+      - backstage.app.name | length > 0
+      - backstage.app.directory | length > 0
+      - backstage.database.host | length > 0
+      - backstage.database.name | length > 0
+      - backstage.database.user | length > 0
+      - backstage.database.password | length > 0
+      - backstage.frontend.port | int >= 1
+      - backstage.frontend.port | int <= 65535
+      - backstage.backend.port | int >= 1
+      - backstage.backend.port | int <= 65535
+    fail_msg: "Backstage requires application, database, frontend, and backend configuration."
+
+- name: Configure Backstage dependencies for Debian-family systems
+  ansible.builtin.include_tasks: Debian.yml
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Configure Backstage dependencies for RedHat-family systems
+  ansible.builtin.include_tasks: RedHat.yml
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Configure Backstage dependencies for SUSE-family systems
+  ansible.builtin.include_tasks: SUSE.yml
+  when: ansible_facts['os_family'] == "Suse"
+
+- name: Resolve Node.js architecture
+  ansible.builtin.set_fact:
+    backstage_node_architecture: "{{ 'x64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
+    backstage_node_directory: "/opt/node-v{{ backstage.node.minimum_version }}-linux-{{ 'x64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
+
+- name: Download Node.js
+  ansible.builtin.get_url:
+    url: "https://nodejs.org/dist/v{{ backstage.node.minimum_version }}/node-v{{ backstage.node.minimum_version }}-linux-{{ backstage_node_architecture }}.tar.xz"
+    dest: "/var/tmp/node-v{{ backstage.node.minimum_version }}-linux-{{ backstage_node_architecture }}.tar.xz"
+    mode: "0644"
+
+- name: Install Node.js
+  ansible.builtin.unarchive:
+    src: "/var/tmp/node-v{{ backstage.node.minimum_version }}-linux-{{ backstage_node_architecture }}.tar.xz"
+    dest: /opt
+    remote_src: true
+    creates: "{{ backstage_node_directory }}/bin/node"
+
+- name: Link Node.js executables
+  ansible.builtin.file:
+    src: "{{ backstage_node_directory }}/bin/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    state: link
+  loop:
+    - node
+    - npm
+    - npx
+    - corepack
+
+- name: Enable Corepack
+  ansible.builtin.command:
+    argv:
+      - "{{ backstage_node_directory }}/bin/corepack"
+      - enable
+  environment:
+    PATH: "{{ backstage_node_directory }}/bin:/usr/local/bin:/usr/bin:/bin"
+  changed_when: false
+
+- name: Prepare Yarn
+  ansible.builtin.command:
+    argv:
+      - "{{ backstage_node_directory }}/bin/corepack"
+      - prepare
+      - "yarn@{{ backstage.yarn.version }}"
+      - --activate
+  environment:
+    PATH: "{{ backstage_node_directory }}/bin:/usr/local/bin:/usr/bin:/bin"
+  changed_when: false
+
+- name: Read target user account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ target_user }}"
+
+- name: Ensure the Backstage application parent exists
+  ansible.builtin.file:
+    path: "{{ backstage.app.directory | dirname }}"
+    state: directory
+    owner: "{{ target_user }}"
+    group: "{{ target_user }}"
+    mode: "0755"
+
+- name: Check whether the Backstage application exists
+  ansible.builtin.stat:
+    path: "{{ backstage.app.directory }}/package.json"
+  register: backstage_application
+
+- name: Create Backstage application
+  ansible.builtin.command:
+    argv:
+      - "{{ backstage_node_directory }}/bin/npx"
+      - --yes
+      - "{{ backstage.app.create_app_package }}"
+      - --path
+      - "{{ backstage.app.directory }}"
+      - --skip-install
+    stdin: "{{ backstage.app.name }}\n"
+    stdin_add_newline: false
+  become: true
+  become_user: "{{ target_user }}"
+  environment:
+    HOME: "{{ ansible_facts['getent_passwd'][target_user][4] }}"
+    PATH: "{{ backstage_node_directory }}/bin:/usr/local/bin:/usr/bin:/bin"
+    CI: "true"
+    npm_config_yes: "true"
+  async: 600
+  poll: 5
+  when: not backstage_application.stat.exists
+
+- name: Write Backstage local configuration
+  ansible.builtin.template:
+    src: app-config.local.yaml.j2
+    dest: "{{ backstage.app.directory }}/app-config.local.yaml"
+    owner: "{{ target_user }}"
+    mode: "0600"
+  notify: Restart Backstage
+
+- name: Install Backstage dependencies
+  ansible.builtin.command:
+    argv:
+      - "{{ backstage_node_directory }}/bin/corepack"
+      - yarn
+      - install
+      - --immutable
+  args:
+    chdir: "{{ backstage.app.directory }}"
+  become: true
+  become_user: "{{ target_user }}"
+  environment:
+    HOME: "{{ ansible_facts['getent_passwd'][target_user][4] }}"
+    PATH: "{{ backstage_node_directory }}/bin:/usr/local/bin:/usr/bin:/bin"
+
+- name: Create Backstage systemd service
+  ansible.builtin.template:
+    src: backstage.service.j2
+    dest: /etc/systemd/system/backstage.service
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart Backstage
+
+- name: Enable and start Backstage
+  ansible.builtin.systemd:
+    name: backstage
+    state: started
+    enabled: true
+    daemon_reload: true

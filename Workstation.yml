@@ -10,4 +10,7 @@
     - role: Gh
     - role: GoogleChrome
     - role: VsCode
+    - role: Ollama
+    - role: OpenLogi
+    - role: lm-sensors
     - role: Docker
