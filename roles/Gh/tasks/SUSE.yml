@@ -1,8 +1,0 @@
----
-- name: Add the official GitHub CLI repository on SUSE systems
-  community.general.zypper_repository:
-    name: gh-cli
-    repo: https://cli.github.com/packages/rpm
-    enabled: true
-    auto_import_keys: true
-    state: present

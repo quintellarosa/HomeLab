@@ -1,6 +1,0 @@
----
-- name: Update all packages on SUSE systems
-  community.general.zypper:
-    name: "*"
-    state: latest
-    update_cache: true

@@ -1,6 +1,0 @@
----
-- name: Install lm-sensors package on Debian-family systems
-  ansible.builtin.apt:
-    name: lm-sensors
-    state: present
-    update_cache: true

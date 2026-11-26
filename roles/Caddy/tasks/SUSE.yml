@@ -1,7 +1,0 @@
----
-- name: Install Caddy on SUSE systems
-  community.general.zypper:
-    name:
-      - caddy
-    state: present
-    update_cache: true

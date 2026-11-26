@@ -1,9 +1,0 @@
----
-- name: OpenLogi Setup
-  hosts: Workstation
-  become: true
-  roles:
-    - role: SystemUpdate
-    - role: Vim
-    - role: cURL
-    - role: OpenLogi

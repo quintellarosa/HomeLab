@@ -1,6 +1,0 @@
----
-- name: Install lm_sensors package on SUSE-family systems
-  ansible.builtin.zypper:
-    name: lm_sensors
-    state: present
-    update_cache: true

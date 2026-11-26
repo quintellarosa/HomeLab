@@ -1,9 +1,0 @@
----
-- name: Add the official GitHub CLI repository on RedHat-family systems
-  ansible.builtin.yum_repository:
-    name: gh-cli
-    description: packages for the GitHub CLI
-    baseurl: https://cli.github.com/packages/rpm
-    enabled: true
-    gpgcheck: true
-    gpgkey: https://cli.github.com/packages/githubcli-archive-keyring.asc

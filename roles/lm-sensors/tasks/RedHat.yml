@@ -1,5 +1,0 @@
----
-- name: Install lm_sensors package on RedHat-family systems
-  ansible.builtin.dnf:
-    name: lm_sensors
-    state: present
