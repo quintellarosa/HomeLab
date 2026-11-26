@@ -20,6 +20,7 @@ IMAGE_SIZE="${IMAGE_SIZE:-12G}"
 MODE=""
 TARGET=""
 ASSUME_YES=0
+SYNC_ONLY=0
 
 usage() {
   cat <<EOF
@@ -32,6 +33,7 @@ Options:
   --distro ubuntu_26_10
   --iso ubuntu-26.10-desktop-amd64.iso
   --ventoy-version 1.1.18
+  --sync-only         Update staged configs (and ISO only if size differs) without reformatting
   --yes               Skip confirmation prompt (only with --device)
 EOF
 }
@@ -71,6 +73,10 @@ while [ $# -gt 0 ]; do
       ;;
     --yes)
       ASSUME_YES=1
+      shift
+      ;;
+    --sync-only)
+      SYNC_ONLY=1
       shift
       ;;
     -h|--help)
@@ -158,13 +164,18 @@ download_ventoy() {
   VENTOY_DIR="$extract_dir"
 }
 
-download_ventoy
+if [ "$SYNC_ONLY" -ne 1 ]; then
+  download_ventoy
+fi
 
 WORK_DEV=""
 if [ "$MODE" = "image" ]; then
   mkdir -p "$(dirname "$TARGET")"
-  rm -f "$TARGET"
-  truncate -s "$IMAGE_SIZE" "$TARGET"
+  if [ "$SYNC_ONLY" -ne 1 ]; then
+    rm -f "$TARGET"
+    truncate -s "$IMAGE_SIZE" "$TARGET"
+  fi
+  [ -f "$TARGET" ] || { echo "Image not found for --sync-only: $TARGET" >&2; exit 1; }
   LOOPDEV="$(losetup -fP --show "$TARGET")"
   WORK_DEV="$LOOPDEV"
 else
@@ -181,7 +192,7 @@ else
 
   echo "Target USB drive details:"
   lsblk -o NAME,SIZE,MODEL,SERIAL,TRAN,RM,MOUNTPOINT "$TARGET"
-  if [ "$ASSUME_YES" -ne 1 ]; then
+  if [ "$SYNC_ONLY" -ne 1 ] && [ "$ASSUME_YES" -ne 1 ]; then
     read -r -p "ALL DATA on $TARGET will be ERASED. Type YES to continue: " confirm
     [ "$confirm" = "YES" ] || { echo "Aborted."; exit 1; }
   fi
@@ -193,16 +204,18 @@ else
   WORK_DEV="$TARGET"
 fi
 
-echo "Installing Ventoy ${VENTOY_VERSION} (GPT, reserve ${RESERVE_MB}MB for cidata) on ${WORK_DEV}..."
-(cd "$VENTOY_DIR" && printf 'y\ny\n' | sh ./Ventoy2Disk.sh -I -g -r "$RESERVE_MB" "$WORK_DEV")
+if [ "$SYNC_ONLY" -ne 1 ]; then
+  echo "Installing Ventoy ${VENTOY_VERSION} (GPT, reserve ${RESERVE_MB}MB for cidata) on ${WORK_DEV}..."
+  (cd "$VENTOY_DIR" && printf 'y\ny\n' | sh ./Ventoy2Disk.sh -I -g -r "$RESERVE_MB" "$WORK_DEV")
 
-partprobe "$WORK_DEV" || true
-udevadm settle
+  partprobe "$WORK_DEV" || true
+  udevadm settle
 
-echo "Creating partition 3 (cidata, FAT32) in reserved trailing space..."
-sgdisk -n 3:0:0 -t 3:0700 -c 3:cidata "$WORK_DEV"
-partprobe "$WORK_DEV" || true
-udevadm settle
+  echo "Creating partition 3 (cidata, FAT32) in reserved trailing space..."
+  sgdisk -n 3:0:0 -t 3:0700 -c 3:cidata "$WORK_DEV"
+  partprobe "$WORK_DEV" || true
+  udevadm settle
+fi
 
 PART1="$(part_path "$WORK_DEV" 1)"
 PART3="$(part_path "$WORK_DEV" 3)"
@@ -210,7 +223,9 @@ for p in "$PART1" "$PART3"; do
   [ -b "$p" ] || { echo "Expected partition $p did not appear." >&2; exit 1; }
 done
 
-mkfs.vfat -n cidata "$PART3" >/dev/null
+if [ "$SYNC_ONLY" -ne 1 ]; then
+  mkfs.vfat -n cidata "$PART3" >/dev/null
+fi
 
 MNT_VENTOY="$(mktemp -d)"
 MNT_CIDATA="$(mktemp -d)"
@@ -223,7 +238,7 @@ cp -f "$VENTOY_JSON" "${MNT_VENTOY}/ventoy/ventoy.json"
 cp -f "$AUTOINSTALL_YAML" "${MNT_VENTOY}/autoinstall/${DISTRO_KEY}/autoinstall.yaml"
 cp -f "$USER_DATA" "${MNT_VENTOY}/autoinstall/${DISTRO_KEY}/user-data"
 cp -f "$META_DATA" "${MNT_VENTOY}/autoinstall/${DISTRO_KEY}/meta-data"
-rsync --info=progress2 -rth --no-perms --no-owner --no-group --modify-window=2 "$ISO_PATH" "${MNT_VENTOY}/iso/${ISO_NAME}"
+rsync --info=progress2 -rth --size-only --no-perms --no-owner --no-group --modify-window=2 "$ISO_PATH" "${MNT_VENTOY}/iso/${ISO_NAME}"
 
 echo "Copying user-data and meta-data to cidata partition 3..."
 cp -f "$USER_DATA" "${MNT_CIDATA}/user-data"
