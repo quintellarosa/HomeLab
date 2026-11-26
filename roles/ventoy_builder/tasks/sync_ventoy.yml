@@ -1,45 +1,74 @@
 ---
-- name: Verify mounted Ventoy USB target exists
-  ansible.builtin.stat:
-    path: "{{ sync_usb_mount_dir }}"
-  register: ventoy_usb_stat
+- name: Sync main Ventoy partition
+  when: sync_usb_mount_dir | length > 0
+  block:
+    - name: Verify mounted Ventoy USB target exists
+      ansible.builtin.stat:
+        path: "{{ sync_usb_mount_dir }}"
+      register: ventoy_usb_stat
 
-- name: Assert Ventoy USB mount point is a directory
-  ansible.builtin.assert:
-    that:
-      - ventoy_usb_stat.stat.exists
-      - ventoy_usb_stat.stat.isdir
-    fail_msg: "sync_usb_mount_dir ({{ sync_usb_mount_dir }}) does not exist or is not a directory."
+    - name: Assert Ventoy USB mount point is a directory
+      ansible.builtin.assert:
+        that:
+          - ventoy_usb_stat.stat.exists
+          - ventoy_usb_stat.stat.isdir
+        fail_msg: "sync_usb_mount_dir ({{ sync_usb_mount_dir }}) does not exist or is not a directory."
 
-- name: Ensure Ventoy target subdirectories exist
-  ansible.builtin.file:
-    path: "{{ sync_usb_mount_dir }}/{{ item }}"
-    state: directory
-    mode: "0755"
-  loop:
-    - ventoy
-    - iso
-    - "autoinstall/{{ target_distro }}"
+    - name: Ensure Ventoy target subdirectories exist
+      ansible.builtin.file:
+        path: "{{ sync_usb_mount_dir }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - ventoy
+        - iso
+        - "autoinstall/{{ target_distro }}"
 
-- name: Copy ventoy.json and autoinstall configs to USB
-  ansible.builtin.copy:
-    src: "{{ ventoy_stage_dir }}/{{ item }}"
-    dest: "{{ sync_usb_mount_dir }}/{{ item }}"
-    mode: "0644"
-  loop:
-    - "ventoy/ventoy.json"
-    - "autoinstall/{{ target_distro }}/autoinstall.yaml"
-    - "autoinstall/{{ target_distro }}/user-data"
-    - "autoinstall/{{ target_distro }}/meta-data"
+    - name: Copy ventoy.json and autoinstall configs to USB
+      ansible.builtin.copy:
+        src: "{{ ventoy_stage_dir }}/{{ item }}"
+        dest: "{{ sync_usb_mount_dir }}/{{ item }}"
+        mode: "0644"
+      loop:
+        - "ventoy/ventoy.json"
+        - "autoinstall/{{ target_distro }}/autoinstall.yaml"
+        - "autoinstall/{{ target_distro }}/user-data"
+        - "autoinstall/{{ target_distro }}/meta-data"
 
-- name: Copy cached ISO to Ventoy USB if downloaded
-  ansible.builtin.stat:
-    path: "{{ iso_cache_dir }}/{{ active_distro.iso_filename }}"
-  register: cached_iso_stat
+    - name: Copy cached ISO to Ventoy USB if downloaded
+      ansible.builtin.stat:
+        path: "{{ iso_cache_dir }}/{{ active_distro.iso_filename }}"
+      register: cached_iso_stat
 
-- name: Sync ISO to Ventoy USB
-  ansible.builtin.copy:
-    src: "{{ iso_cache_dir }}/{{ active_distro.iso_filename }}"
-    dest: "{{ sync_usb_mount_dir }}/iso/{{ active_distro.iso_filename }}"
-    mode: "0644"
-  when: cached_iso_stat.stat.exists
+    - name: Sync ISO to Ventoy USB
+      ansible.builtin.copy:
+        src: "{{ iso_cache_dir }}/{{ active_distro.iso_filename }}"
+        dest: "{{ sync_usb_mount_dir }}/iso/{{ active_distro.iso_filename }}"
+        mode: "0644"
+      when: cached_iso_stat.stat.exists
+
+- name: Sync cidata partition
+  when:
+    - sync_cidata_mount_dir | length > 0
+    - active_distro.template_type == "ubuntu_autoinstall"
+  block:
+    - name: Verify mounted cidata partition exists
+      ansible.builtin.stat:
+        path: "{{ sync_cidata_mount_dir }}"
+      register: cidata_stat
+
+    - name: Assert cidata mount point is a directory
+      ansible.builtin.assert:
+        that:
+          - cidata_stat.stat.exists
+          - cidata_stat.stat.isdir
+        fail_msg: "sync_cidata_mount_dir ({{ sync_cidata_mount_dir }}) does not exist or is not a directory."
+
+    - name: Copy Ubuntu autoinstall user-data and meta-data to cidata partition
+      ansible.builtin.copy:
+        src: "{{ ventoy_stage_dir }}/autoinstall/{{ target_distro }}/{{ item }}"
+        dest: "{{ sync_cidata_mount_dir }}/{{ item }}"
+        mode: "0644"
+      loop:
+        - user-data
+        - meta-data

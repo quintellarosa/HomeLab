@@ -45,7 +45,16 @@ autoinstall:
           name: "en*"
         dhcp4: true
         optional: true
-{% if (wifi_ssid | default('') | length > 0) and (wifi_password | default('') | length > 0) %}
+{% set _wifi_ns = namespace(nets=[]) %}
+{% for net in (wifi_networks | default([])) %}
+{%   if (net.ssid | default('') | length > 0) and (net.password | default('') | length > 0) %}
+{%     set _wifi_ns.nets = _wifi_ns.nets + [net] %}
+{%   endif %}
+{% endfor %}
+{% if (wifi_ssid | default('') | length > 0) and (wifi_password | default('') | length > 0) and (wifi_ssid not in (_wifi_ns.nets | map(attribute='ssid') | list)) %}
+{%   set _wifi_ns.nets = _wifi_ns.nets + [{'ssid': wifi_ssid, 'password': wifi_password}] %}
+{% endif %}
+{% if _wifi_ns.nets | length > 0 %}
     wifis:
       all-wl:
         match:
@@ -53,8 +62,10 @@ autoinstall:
         dhcp4: true
         optional: true
         access-points:
-          "{{ wifi_ssid }}":
-            password: "{{ wifi_password }}"
+{% for net in _wifi_ns.nets %}
+          {{ net.ssid | to_json }}:
+            password: {{ net.password | to_json }}
+{% endfor %}
 {% endif %}
 
   # Fail-closed disk verification before Curtin touches any block device
@@ -261,6 +272,7 @@ autoinstall:
         printf "[org/gnome/desktop/input-sources]\nsources=[{{ desktop_input_sources | join(', ') }}]\n"
       } > /target/etc/dconf/db/local.d/00-homelab
       curtin in-target --target=/target -- dconf update
+      chmod -R a+rX /target/etc/dconf
 
 {% if desktop_share_error_reports | bool %}
     # 6. Enable error/metrics reporting (whoopsie + apport)

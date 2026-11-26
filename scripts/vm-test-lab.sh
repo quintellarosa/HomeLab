@@ -172,10 +172,14 @@ run_qemu() {
 cmd_boot_install() {
   [ -f "$OS_IMG" ] || { echo "Run '$(basename "$0") init' first." >&2; exit 1; }
   if [ -n "$VENTOY_IMG" ]; then
-    [ -f "$VENTOY_IMG" ] || { echo "VENTOY_IMG not found: $VENTOY_IMG" >&2; exit 1; }
+    [ -e "$VENTOY_IMG" ] || { echo "VENTOY_IMG not found: $VENTOY_IMG" >&2; exit 1; }
+    local ventoy_drive="if=none,id=usb_ventoy,file=${VENTOY_IMG},format=raw"
+    if [ -b "$VENTOY_IMG" ]; then
+      ventoy_drive="${ventoy_drive},cache=none,aio=native"
+    fi
     run_qemu \
       -no-reboot \
-      -drive "if=none,id=usb_ventoy,file=${VENTOY_IMG},format=raw" \
+      -drive "$ventoy_drive" \
       -device "usb-storage,drive=usb_ventoy,bootindex=1"
   else
     [ -f "$ISO_FILE" ] || { echo "ISO not found: $ISO_FILE" >&2; exit 1; }

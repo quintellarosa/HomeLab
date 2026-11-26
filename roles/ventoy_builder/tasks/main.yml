@@ -40,4 +40,4 @@
 
 - name: Sync staged files to mounted Ventoy USB
   ansible.builtin.include_tasks: sync_ventoy.yml
-  when: sync_usb_mount_dir | length > 0
+  when: (sync_usb_mount_dir | length > 0) or (sync_cidata_mount_dir | length > 0)

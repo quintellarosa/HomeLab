@@ -34,12 +34,32 @@ Drives are **never** matched by `/dev/nvmeXnY`. Both `test_vm` and `laptop` prof
    ./scripts/vm-test-lab.sh boot-installed
    ```
 
+## Testing with a Full Ventoy + `cidata` Layout in QEMU/KVM
+
+1. Build a virtual 3-partition Ventoy + `cidata` disk image (`test_vm` profile):
+   ```bash
+   sudo ./scripts/prepare-ventoy-usb.sh --image
+   ```
+2. Boot the VM from that Ventoy image:
+   ```bash
+   ./scripts/vm-test-lab.sh init
+   VENTOY_IMG=build/vm/ventoy-test.img ./scripts/vm-test-lab.sh boot-install
+   ./scripts/vm-test-lab.sh boot-installed
+   ```
+
+*(You can also test a physical USB stick prepared with `test_vm` by passing `VENTOY_IMG=/dev/disk/by-id/usb-...`, which typically requires `sudo` for raw block access.)*
+
 ## Syncing to a Real Ventoy USB Stick
 
-When switching from VM testing (`test_vm`) to your real notebook (`laptop`):
-```bash
-ansible-playbook playbooks/build-ventoy.yml \
-  -e disk_profile=laptop \
-  -e sync_usb_mount_dir=/media/$USER/Ventoy
-```
-If using a dedicated `cidata` partition on the Ventoy USB stick (recommended for Ubuntu Desktop), copy `build/ventoy-stage/autoinstall/ubuntu_26_10/user-data` and `meta-data` onto that `cidata` FAT32 partition.
+1. Prepare the physical USB drive once with Ventoy + `cidata` using the **laptop** profile:
+   ```bash
+   ansible-playbook playbooks/build-ventoy.yml -e disk_profile=laptop -e skip_iso_download=true
+   sudo ./scripts/prepare-ventoy-usb.sh --device /dev/disk/by-id/usb-...
+   ```
+2. On future config updates (without reformatting the USB stick), mount both USB partitions and sync:
+   ```bash
+   ansible-playbook playbooks/build-ventoy.yml \
+     -e disk_profile=laptop \
+     -e sync_usb_mount_dir=/media/$USER/Ventoy \
+     -e sync_cidata_mount_dir=/media/$USER/cidata
+   ```

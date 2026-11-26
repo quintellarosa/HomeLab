@@ -22,7 +22,7 @@ disk_profile: test_vm
 homelab_build_dir: "{{ playbook_dir }}/../build"
 iso_cache_dir: "{{ homelab_build_dir }}/isos"
 ventoy_stage_dir: "{{ homelab_build_dir }}/ventoy-stage"
-ventoy_version: "1.1.10"
+ventoy_version: "1.1.18"
 
 # Bootstrap packages installed during OS installation
 bootstrap_packages:
@@ -61,6 +61,8 @@ desktop_input_sources:
 # Optional SSH authorized keys (can be overridden in group_vars/secrets.yml)
 ssh_authorized_keys: []
 
-# Optional Wi-Fi credentials (set real values in gitignored group_vars/secrets.yml)
+# Optional Wi-Fi networks (set real values in gitignored group_vars/secrets.yml)
+# Each entry: { ssid: "NetworkName", password: "SecretPassword" }
+wifi_networks: []
 wifi_ssid: ""
 wifi_password: ""
