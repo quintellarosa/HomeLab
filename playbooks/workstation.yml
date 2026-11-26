@@ -1,0 +1,105 @@
+---
+# Phase 2: Post-install notebook reconfiguration (to be expanded with roles)
+- name: Configure HomeLab personal notebook
+  hosts: localhost
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Report detected OS family and user
+      ansible.builtin.debug:
+        msg:
+          - "OS: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }} ({{ ansible_facts['os_family'] }})"
+          - "Target user: {{ target_user }} (uid={{ target_uid }}, gid={{ target_gid }})"
+
+    - name: Ensure essential CLI tools are installed
+      ansible.builtin.package:
+        name:
+          - git
+          - curl
+          - htop
+          - tmux
+          - stow
+        state: present
+
+    - name: Check if user avatar file exists
+      ansible.builtin.stat:
+        path: "{{ user_avatar_file }}"
+      register: workstation_avatar_stat
+      when: user_avatar_file | default('') | length > 0
+
+    - name: Install user avatar to ~/.face and AccountsService
+      when:
+        - user_avatar_file | default('') | length > 0
+        - workstation_avatar_stat.stat.exists | default(false)
+      block:
+        - name: Copy user avatar to ~/.face
+          ansible.builtin.copy:
+            src: "{{ user_avatar_file }}"
+            dest: "/home/{{ target_user }}/.face"
+            owner: "{{ target_user }}"
+            group: "{{ target_user }}"
+            mode: "0644"
+
+        - name: Copy user avatar to AccountsService icons
+          ansible.builtin.copy:
+            src: "{{ user_avatar_file }}"
+            dest: "/var/lib/AccountsService/icons/{{ target_user }}"
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: Ensure AccountsService [User] section exists
+          ansible.builtin.lineinfile:
+            path: "/var/lib/AccountsService/users/{{ target_user }}"
+            regexp: '^\[User\]$'
+            line: "[User]"
+            insertbefore: BOF
+            create: true
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: Configure AccountsService user icon path
+          ansible.builtin.lineinfile:
+            path: "/var/lib/AccountsService/users/{{ target_user }}"
+            regexp: "^Icon="
+            line: "Icon=/var/lib/AccountsService/icons/{{ target_user }}"
+            insertafter: '^\[User\]'
+            create: true
+            owner: root
+            group: root
+            mode: "0644"
+
+    - name: Check if Bluetooth pairing archive exists
+      ansible.builtin.stat:
+        path: "{{ bluetooth_archive_file }}"
+      register: workstation_bt_stat
+      when: bluetooth_archive_file | default('') | length > 0
+
+    - name: Restore Bluetooth paired devices
+      when:
+        - bluetooth_archive_file | default('') | length > 0
+        - workstation_bt_stat.stat.exists | default(false)
+      block:
+        - name: Ensure /var/lib/bluetooth exists
+          ansible.builtin.file:
+            path: /var/lib/bluetooth
+            state: directory
+            owner: root
+            group: root
+            mode: "0700"
+
+        - name: Extract Bluetooth pairing archive
+          ansible.builtin.unarchive:
+            src: "{{ bluetooth_archive_file }}"
+            dest: /var/lib/bluetooth
+            owner: root
+            group: root
+          notify: Restart bluetooth
+
+  handlers:
+    - name: Restart bluetooth
+      ansible.builtin.service:
+        name: bluetooth
+        state: restarted

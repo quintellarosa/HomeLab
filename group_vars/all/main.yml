@@ -1,0 +1,66 @@
+---
+# Primary user identity (kept identical across all distros for /home compatibility)
+target_user: quintellarosa
+target_uid: 1000
+target_gid: 1000
+target_gecos: "Quintella Rosa"
+target_hostname: homelab-notebook
+user_avatar_file: "{{ playbook_dir }}/../files/user-avatar.jpg"
+bluetooth_archive_file: "{{ playbook_dir }}/../secrets/bluetooth.tar.gz"
+
+# Localization
+target_locale: en_US.UTF-8
+target_timezone: America/Sao_Paulo
+target_keyboard_layout: br
+target_keyboard_variant: ""
+
+# Distro & profile selection (override with -e target_distro=... -e disk_profile=...)
+target_distro: ubuntu_26_10
+disk_profile: test_vm
+
+# Ventoy / build paths
+homelab_build_dir: "{{ playbook_dir }}/../build"
+iso_cache_dir: "{{ homelab_build_dir }}/isos"
+ventoy_stage_dir: "{{ homelab_build_dir }}/ventoy-stage"
+ventoy_version: "1.1.10"
+
+# Bootstrap packages installed during OS installation
+bootstrap_packages:
+  - ansible
+  - btrfs-progs
+  - curl
+  - git
+  - gpg
+  - openssh-server
+  - ubuntu-drivers-common
+
+# NVIDIA driver automation (only runs if an NVIDIA PCI device [10de:*] is detected)
+install_nvidia_if_present: true
+
+# Desktop flavor for Ubuntu Desktop autoinstall ('ubuntu-desktop-minimal' or 'ubuntu-desktop')
+ubuntu_desktop_source: ubuntu-desktop-minimal
+
+# Desktop & first-login defaults (Ubuntu GNOME)
+desktop_skip_welcome_wizard: true
+desktop_dark_mode: true
+desktop_location_services: true
+desktop_share_system_data: true
+desktop_share_error_reports: true
+desktop_dock_position: "BOTTOM"
+desktop_dock_icon_size: 32
+desktop_dock_extend_height: false
+desktop_dock_show_mounts: false
+desktop_dock_show_trash: false
+desktop_icons_size: "small"
+desktop_icons_start_corner: "top-left"
+desktop_icons_show_home: false
+desktop_input_sources:
+  - "('xkb', 'br')"
+  - "('xkb', 'us+intl')"
+
+# Optional SSH authorized keys (can be overridden in group_vars/secrets.yml)
+ssh_authorized_keys: []
+
+# Optional Wi-Fi credentials (set real values in gitignored group_vars/secrets.yml)
+wifi_ssid: ""
+wifi_password: ""

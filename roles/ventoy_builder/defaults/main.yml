@@ -1,0 +1,4 @@
+---
+skip_iso_download: false
+sync_usb_mount_dir: ""
+cidata_image_size: "4M"

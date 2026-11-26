@@ -1,0 +1,34 @@
+---
+# Disk safety contracts per target environment.
+# NEVER match disks by /dev/nvmeXnY device names; always match by hardware serial and filesystem UUID/label.
+
+disk_profiles:
+  test_vm:
+    description: "QEMU/KVM 3-NVMe test lab (safe virtual disks)"
+    os_disk_serial: "HOMELAB-OS-DISK"
+    home_disk_serial: "HOMELAB-HOME-DISK"
+    # In the VM test lab, /home is matched by partition/filesystem label unless overridden
+    home_fs_uuid: ""
+    home_fs_label: "HOME_TEST"
+    home_fs_type: "btrfs"
+    home_mount_options: "defaults"
+    protected_disk_serials:
+      - "HOMELAB-WIN-DISK"
+      - "HOMELAB-HOME-DISK"
+
+  laptop:
+    description: "Personal notebook (3 NVMe drives: Windows + Linux OS + /home)"
+    # Samsung SSD 970 EVO 500GB (Linux OS target - WIPED AND REINSTALLED)
+    os_disk_serial: "S5H7NS1NB05364M"
+    # WD Green SN350 1TB (Preserved /home - NEVER WIPED)
+    home_disk_serial: "25235B800776"
+    home_fs_uuid: "499b502c-0059-4099-bb3f-11f0299dc37d"
+    home_fs_label: "Data"
+    home_fs_type: "btrfs"
+    home_mount_options: "defaults"
+    # Drives that early-commands will refuse to touch under any circumstance
+    protected_disk_serials:
+      - "S65RNE0R238123"   # PM9A1 NVMe Samsung 512GB (Windows)
+      - "25235B800776"     # WD Green SN350 1TB (/home)
+
+active_disk_profile: "{{ disk_profiles[disk_profile] }}"

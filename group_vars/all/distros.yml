@@ -1,0 +1,12 @@
+---
+distros:
+  ubuntu_26_10:
+    family: debian
+    name: "Ubuntu 26.10 Desktop"
+    version: "26.10"
+    iso_filename: "ubuntu-26.10-desktop-amd64.iso"
+    iso_url: "https://releases.ubuntu.com/26.10/ubuntu-26.10-desktop-amd64.iso"
+    sha256sums_url: "https://releases.ubuntu.com/26.10/SHA256SUMS"
+    template_type: "ubuntu_autoinstall"
+
+active_distro: "{{ distros[target_distro] }}"
