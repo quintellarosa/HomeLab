@@ -3,3 +3,31 @@
   ansible.builtin.systemd_service:
     name: "{{ 'virtqemud.service' if (_virtualization_use_modular_daemons | default(false) | bool) else 'libvirtd.service' }}"
     state: restarted
+
+- name: Update GRUB configuration (Debian)
+  ansible.builtin.command:
+    cmd: update-grub
+  when: ansible_facts['os_family'] == 'Debian'
+  changed_when: true
+  listen: Update GRUB configuration
+
+- name: Update GRUB configuration (RedHat / SUSE)
+  ansible.builtin.command:
+    cmd: "grub2-mkconfig -o {{ _virtualization_grub2_cfg | default('/boot/grub2/grub.cfg') }}"
+  when: ansible_facts['os_family'] in ['RedHat', 'Suse']
+  changed_when: true
+  listen: Update GRUB configuration
+
+- name: Regenerate initramfs (dracut)
+  ansible.builtin.command:
+    cmd: dracut --regenerate-all --force
+  when: _virtualization_dracut_bin.stat.exists | default(false)
+  changed_when: true
+  listen: Regenerate initramfs
+
+- name: Regenerate initramfs (initramfs-tools)
+  ansible.builtin.command:
+    cmd: update-initramfs -u -k all
+  when: not (_virtualization_dracut_bin.stat.exists | default(false))
+  changed_when: true
+  listen: Regenerate initramfs

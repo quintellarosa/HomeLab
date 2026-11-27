@@ -5,6 +5,21 @@ virtualization_user_groups:
   - libvirt
   - kvm
 
+# PCI-Express Passthrough (IOMMU + VFIO)
+virtualization_enable_pcie_passthrough: true
+virtualization_vfio_modules:
+  - vfio
+  - vfio_iommu_type1
+  - vfio_pci
+# Optional list of PCI "vendor:device" IDs to bind to vfio-pci at boot
+# (e.g. ["10de:1fb9", "10de:10fa"]). Leave empty for dynamic libvirt passthrough.
+virtualization_vfio_pci_ids: []
+# Optional kernel driver names that must wait for vfio-pci when static PCI IDs are bound
+# (e.g. ["nouveau", "nvidia", "nvidia_drm"]).
+virtualization_vfio_softdeps: []
+# Ignore unhandled MSRs in KVM (recommended for Windows / Windows Server guests)
+virtualization_kvm_ignore_msrs: true
+
 virtualization_packages_by_family:
   Debian:
     common:

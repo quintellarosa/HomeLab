@@ -143,6 +143,10 @@
         - _virtualization_default_net.stdout is regex('Autostart:\s+no')
       changed_when: true
 
+- name: Configure PCI-Express passthrough (IOMMU and VFIO)
+  ansible.builtin.include_tasks: pcie_passthrough.yml
+  when: virtualization_enable_pcie_passthrough | bool
+
 - name: Check if /dev/kvm is present
   ansible.builtin.stat:
     path: /dev/kvm

@@ -1,0 +1,317 @@
+---
+# ---------------------------------------------------------------------------
+# PCI-Express Passthrough (IOMMU + VFIO) for Debian, RedHat, and SUSE
+# ---------------------------------------------------------------------------
+
+# 1. Detect CPU vendor and build required IOMMU kernel parameters
+- name: Determine CPU vendor for IOMMU kernel parameter
+  ansible.builtin.set_fact:
+    _virtualization_cpu_vendor: >-
+      {{
+        'intel'
+        if ('GenuineIntel' in (ansible_facts['processor'] | default([]) | join(' ')))
+        else (
+          'amd'
+          if ('AuthenticAMD' in (ansible_facts['processor'] | default([]) | join(' ')))
+          else 'unknown'
+        )
+      }}
+
+- name: Build IOMMU kernel arguments for {{ _virtualization_cpu_vendor }} CPU
+  ansible.builtin.set_fact:
+    _virtualization_iommu_kernel_args: >-
+      {{
+        (['intel_iommu=on', 'iommu=pt'] if _virtualization_cpu_vendor == 'intel'
+         else (['amd_iommu=on', 'iommu=pt'] if _virtualization_cpu_vendor == 'amd'
+               else ['iommu=pt']))
+      }}
+
+# 2. Configure bootloader IOMMU kernel parameters (Debian, RedHat, SUSE)
+- name: Configure GRUB drop-in for IOMMU on Debian family
+  when: ansible_facts['os_family'] == 'Debian'
+  block:
+    - name: Ensure /etc/default/grub.d directory exists
+      ansible.builtin.file:
+        path: /etc/default/grub.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install GRUB drop-in enabling IOMMU passthrough mode
+      ansible.builtin.copy:
+        dest: /etc/default/grub.d/90-homelab-iommu.cfg
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible (Virtualization role) - enable IOMMU for PCIe passthrough
+          GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT {{ _virtualization_iommu_kernel_args | join(' ') }}"
+      register: _virtualization_grub_debian_cfg
+      notify: Update GRUB configuration
+
+- name: Configure IOMMU kernel arguments on RedHat family
+  when: ansible_facts['os_family'] == 'RedHat'
+  block:
+    - name: Check if grubby is available (RedHat / Fedora)
+      ansible.builtin.stat:
+        path: /usr/sbin/grubby
+      register: _virtualization_grubby_bin
+
+    - name: Inspect default kernel arguments via grubby
+      ansible.builtin.command:
+        cmd: grubby --info=DEFAULT
+      register: _virtualization_grubby_default
+      changed_when: false
+      check_mode: false
+      when: _virtualization_grubby_bin.stat.exists
+
+    - name: Determine missing IOMMU arguments for grubby
+      ansible.builtin.set_fact:
+        _virtualization_grubby_missing_args: >-
+          {{
+            _virtualization_iommu_kernel_args
+            | reject('in', (_virtualization_grubby_default.stdout | default('')))
+            | list
+          }}
+      when: _virtualization_grubby_bin.stat.exists
+
+    - name: Append missing IOMMU kernel arguments via grubby
+      ansible.builtin.command:
+        cmd: "grubby --update-kernel=ALL --args='{{ _virtualization_grubby_missing_args | join(' ') }}'"
+      when:
+        - _virtualization_grubby_bin.stat.exists
+        - (_virtualization_grubby_missing_args | default([]) | length) > 0
+      register: _virtualization_grubby_updated
+      changed_when: true
+
+- name: Configure IOMMU kernel arguments in /etc/default/grub (SUSE or RedHat without grubby)
+  when: >-
+    (ansible_facts['os_family'] == 'Suse')
+    or (ansible_facts['os_family'] == 'RedHat' and not (_virtualization_grubby_bin.stat.exists | default(false)))
+  block:
+    - name: Check if /etc/default/grub exists
+      ansible.builtin.stat:
+        path: /etc/default/grub
+      register: _virtualization_default_grub_stat
+
+    - name: Read /etc/default/grub
+      ansible.builtin.slurp:
+        path: /etc/default/grub
+      register: _virtualization_default_grub_raw
+      when: _virtualization_default_grub_stat.stat.exists
+
+    - name: Extract current GRUB_CMDLINE_LINUX_DEFAULT value
+      ansible.builtin.set_fact:
+        _virtualization_grub_current_cmdline: >-
+          {{
+            (
+              (_virtualization_default_grub_raw.content | b64decode)
+              | regex_search('(?m)^GRUB_CMDLINE_LINUX_DEFAULT="([^"]*)"', '\1')
+              | default([''], true)
+              | first
+            )
+          }}
+      when: _virtualization_default_grub_stat.stat.exists
+
+    - name: Determine missing IOMMU arguments for /etc/default/grub
+      ansible.builtin.set_fact:
+        _virtualization_grub_missing_args: >-
+          {{
+            _virtualization_iommu_kernel_args
+            | reject('in', (_virtualization_grub_current_cmdline | default('')).split())
+            | list
+          }}
+      when: _virtualization_default_grub_stat.stat.exists
+
+    - name: Set target grub2.cfg path
+      ansible.builtin.set_fact:
+        _virtualization_grub2_cfg: /boot/grub2/grub.cfg
+
+    - name: Append missing IOMMU arguments to GRUB_CMDLINE_LINUX_DEFAULT
+      ansible.builtin.lineinfile:
+        path: /etc/default/grub
+        regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
+        line: >-
+          GRUB_CMDLINE_LINUX_DEFAULT="{{
+            ((_virtualization_grub_current_cmdline | default('')).split() + _virtualization_grub_missing_args)
+            | join(' ')
+          }}"
+      when:
+        - _virtualization_default_grub_stat.stat.exists
+        - (_virtualization_grub_missing_args | default([]) | length) > 0
+      register: _virtualization_grub_file_updated
+      notify: Update GRUB configuration
+
+# 3. Persist and load VFIO kernel modules
+- name: Persist VFIO kernel modules in /etc/modules-load.d/vfio.conf
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/vfio.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (Virtualization role) - PCIe passthrough modules
+      {% for mod in virtualization_vfio_modules %}
+      {{ mod }}
+      {% endfor %}
+
+- name: Check whether VFIO kernel modules are currently loaded
+  ansible.builtin.stat:
+    path: "/sys/module/{{ item }}"
+  loop: "{{ virtualization_vfio_modules }}"
+  register: _virtualization_vfio_loaded
+
+- name: Load missing VFIO kernel modules immediately
+  ansible.builtin.command:
+    cmd: "modprobe {{ item.item }}"
+  loop: "{{ _virtualization_vfio_loaded.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: not item.stat.exists
+  changed_when: true
+
+# 4. Optional static vfio-pci device binding & KVM Windows MSR tuning
+- name: Configure static vfio-pci device IDs in /etc/modprobe.d/vfio.conf
+  ansible.builtin.copy:
+    dest: /etc/modprobe.d/vfio.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (Virtualization role) - static PCIe passthrough binding
+      options vfio-pci ids={{ virtualization_vfio_pci_ids | join(',') }}
+      {% for drv in virtualization_vfio_softdeps %}
+      softdep {{ drv }} pre: vfio-pci
+      {% endfor %}
+  when: (virtualization_vfio_pci_ids | length) > 0
+  register: _virtualization_vfio_modprobe_set
+  notify: Regenerate initramfs
+
+- name: Remove static /etc/modprobe.d/vfio.conf when no static PCI IDs are configured
+  ansible.builtin.file:
+    path: /etc/modprobe.d/vfio.conf
+    state: absent
+  when: (virtualization_vfio_pci_ids | length) == 0
+  register: _virtualization_vfio_modprobe_removed
+  notify: Regenerate initramfs
+
+- name: Configure KVM to ignore unhandled MSRs for Windows guest stability
+  ansible.builtin.copy:
+    dest: /etc/modprobe.d/kvm-homelab.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (Virtualization role) - prevents Windows BSODs on unhandled MSR reads
+      options kvm ignore_msrs=1 report_ignored_msrs=0
+  when: virtualization_kvm_ignore_msrs | bool
+
+# 5. Include VFIO modules in early boot initramfs (dracut or initramfs-tools)
+- name: Check whether dracut is installed
+  ansible.builtin.stat:
+    path: /usr/bin/dracut
+  register: _virtualization_dracut_bin
+
+- name: Configure dracut to load VFIO drivers in early initramfs
+  when: _virtualization_dracut_bin.stat.exists
+  block:
+    - name: Ensure /etc/dracut.conf.d directory exists
+      ansible.builtin.file:
+        path: /etc/dracut.conf.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Add VFIO force_drivers drop-in for dracut
+      ansible.builtin.copy:
+        dest: /etc/dracut.conf.d/10-vfio.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible (Virtualization role) - early VFIO drivers for PCIe passthrough
+          force_drivers+=" {{ virtualization_vfio_modules | join(' ') }} "
+      register: _virtualization_dracut_vfio_cfg
+      notify: Regenerate initramfs
+
+- name: Configure initramfs-tools to load VFIO drivers on non-dracut Debian/Ubuntu hosts
+  when: not _virtualization_dracut_bin.stat.exists
+  block:
+    - name: Check if /etc/initramfs-tools/modules exists
+      ansible.builtin.stat:
+        path: /etc/initramfs-tools/modules
+      register: _virtualization_initramfs_modules_stat
+
+    - name: Add VFIO modules to /etc/initramfs-tools/modules
+      ansible.builtin.blockinfile:
+        path: /etc/initramfs-tools/modules
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - HomeLab VFIO PCIe passthrough"
+        block: "{{ virtualization_vfio_modules | join('\n') }}"
+      when: _virtualization_initramfs_modules_stat.stat.exists
+      register: _virtualization_initramfs_vfio_cfg
+      notify: Regenerate initramfs
+
+# 6. Memory lock limits for VFIO DMA pinning & RedHat SELinux sysfs access
+- name: Configure unlimited memlock limits for libvirt and kvm groups (VFIO RAM pinning)
+  ansible.builtin.copy:
+    dest: /etc/security/limits.d/90-libvirt-vfio.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (Virtualization role) - VFIO PCIe passthrough memory locking
+      @libvirt soft memlock unlimited
+      @libvirt hard memlock unlimited
+      @kvm     soft memlock unlimited
+      @kvm     hard memlock unlimited
+
+- name: Allow libvirt sysfs access under SELinux on RedHat family
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+  block:
+    - name: Check SELinux boolean virt_use_sysfs
+      ansible.builtin.command:
+        cmd: getsebool virt_use_sysfs
+      register: _virtualization_sebool_sysfs
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Enable SELinux boolean virt_use_sysfs for PCIe passthrough
+      ansible.builtin.command:
+        cmd: setsebool -P virt_use_sysfs 1
+      when:
+        - _virtualization_sebool_sysfs.rc == 0
+        - "'--> off' in _virtualization_sebool_sysfs.stdout"
+      changed_when: true
+
+# 7. Check current kernel cmdline and remind user if a reboot is needed
+- name: Read current kernel command line
+  ansible.builtin.slurp:
+    path: /proc/cmdline
+  register: _virtualization_proc_cmdline_raw
+
+- name: Determine whether a reboot is needed to activate IOMMU/VFIO boot configuration
+  ansible.builtin.set_fact:
+    _virtualization_running_cmdline: "{{ _virtualization_proc_cmdline_raw.content | b64decode }}"
+    _virtualization_pcie_reboot_required: >-
+      {{
+        ((_virtualization_grub_debian_cfg | default({})) is changed)
+        or ((_virtualization_grubby_updated | default({})) is changed)
+        or ((_virtualization_grub_file_updated | default({})) is changed)
+        or ((_virtualization_dracut_vfio_cfg | default({})) is changed)
+        or ((_virtualization_initramfs_vfio_cfg | default({})) is changed)
+        or ((_virtualization_vfio_modprobe_set | default({})) is changed)
+        or ((_virtualization_vfio_modprobe_removed | default({})) is changed)
+        or ((_virtualization_iommu_kernel_args | reject('in', (_virtualization_proc_cmdline_raw.content | b64decode).split()) | list) | length > 0)
+      }}
+
+- name: Remind user to reboot to activate PCIe passthrough boot parameters
+  ansible.builtin.debug:
+    msg: >-
+      PCIe passthrough (IOMMU + VFIO) has been configured ({{ _virtualization_iommu_kernel_args | join(' ') }}).
+      Reboot the host so the updated kernel parameters and early VFIO initramfs take effect before assigning PCIe devices to a VM.
+  when: _virtualization_pcie_reboot_required | bool
