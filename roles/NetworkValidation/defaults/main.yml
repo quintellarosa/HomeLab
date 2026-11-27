@@ -1,0 +1,19 @@
+---
+# Minimum and maximum allowed CIDR prefix length for the virtual network
+# (/30 gives 2 usable hosts; /31 and /32 cannot host a gateway + workloads)
+network_validation_min_prefix: 8
+network_validation_max_prefix: 30
+
+# Require the virtual network to be within RFC 1918 private IPv4 space
+# (10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16)
+network_validation_require_private: true
+
+# Fail if the virtual network overlaps with the host's physical default_ipv4 subnet
+network_validation_check_host_lan_overlap: true
+
+# Reserved cluster/container CIDRs that must not overlap the virtual network
+network_validation_reserved_cidrs:
+  - name: "Kubernetes Pod CIDR"
+    cidr: "10.244.0.0/16"
+  - name: "Kubernetes Service CIDR"
+    cidr: "10.96.0.0/12"

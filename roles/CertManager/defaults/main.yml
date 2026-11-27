@@ -13,8 +13,13 @@ cert_manager_ca_cert_file: "/etc/kubernetes/homelab-root-ca.crt"
 cert_manager_kubeconfig: "/etc/kubernetes/admin.conf"
 cert_manager_apiserver_manifest: "/etc/kubernetes/manifests/kube-apiserver.yaml"
 
-# Private HomeLab Root CA & ClusterIssuer
-cert_manager_domain: "quintellarosa.home"
+# Private HomeLab Root CA & ClusterIssuer (follows global inventory 'network.domain' when defined)
+cert_manager_domain: >-
+  {{
+    network.domain
+    if (network is defined and network.domain is defined and (network.domain | length > 0))
+    else (homelab_domain | default('quintellarosa.home', true))
+  }}
 cert_manager_bootstrap_issuer_name: "homelab-selfsigned-bootstrap"
 cert_manager_ca_cert_name: "homelab-root-ca"
 cert_manager_ca_secret_name: "homelab-root-ca-secret"

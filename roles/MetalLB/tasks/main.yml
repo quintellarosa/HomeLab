@@ -93,7 +93,11 @@
           {{
             (_metallb_libvirt_bridge_candidates | first)
             if (_metallb_libvirt_bridge_candidates | length > 0 and (_metallb_libvirt_bridge_candidates | first) not in ['', '-'])
-            else ''
+            else (
+              network.name
+              if (network is defined and network.name is defined and (network.name in ansible_facts))
+              else ''
+            )
           }}
 
     - name: Decide whether to scope MetalLB L2 and firewall to libvirt virtual NIC

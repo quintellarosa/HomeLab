@@ -73,7 +73,11 @@
       {{
         (_postgresql_libvirt_bridge_candidates | first)
         if (_postgresql_libvirt_bridge_candidates | length > 0 and (_postgresql_libvirt_bridge_candidates | first) not in ['', '-'])
-        else ''
+        else (
+          network.name
+          if (network is defined and network.name is defined and (network.name in ansible_facts))
+          else ''
+        )
       }}
 
 - name: Determine whether to bind PostgreSQL to libvirt default virtual NIC

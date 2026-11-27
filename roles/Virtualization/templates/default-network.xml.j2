@@ -1,0 +1,16 @@
+<network>
+  <name>{{ virtualization_default_network_name }}</name>
+  <forward mode='nat'>
+    <nat>
+      <port start='1024' end='65535'/>
+    </nat>
+  </forward>
+  <bridge name='{{ virtualization_default_network_bridge }}' stp='on' delay='0'/>
+  <ip address='{{ virtualization_default_network_gateway }}' netmask='{{ virtualization_default_network_netmask }}'>
+{% if (virtualization_default_network_dhcp | bool) and (virtualization_default_network_dhcp_start | length > 0) and (virtualization_default_network_dhcp_end | length > 0) %}
+    <dhcp>
+      <range start='{{ virtualization_default_network_dhcp_start }}' end='{{ virtualization_default_network_dhcp_end }}'/>
+    </dhcp>
+{% endif %}
+  </ip>
+</network>

@@ -1,4 +1,25 @@
 all:
+  vars:
+    network:
+      name: "virbr0"
+      domain: "quintellarosa.home"
+      base: "192.168.122.0"
+      prefix_length: 24
+      netmask: "255.255.255.0"
+      gateway: "192.168.122.1"
+      dns:
+        primary: "192.168.122.2"
+        secondary: "8.8.8.8"
+      ranges:
+        static:
+          start: "192.168.122.2"
+          end: "192.168.122.100"
+        dhcp:
+          start: "192.168.122.101"
+          end: "192.168.122.200"
+        metallb:
+          start: "192.168.122.240"
+          end: "192.168.122.250"
   hosts:
     localhost:
       ansible_connection: local

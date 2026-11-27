@@ -119,63 +119,141 @@
   block:
     - name: Inspect default libvirt network
       ansible.builtin.command:
-        cmd: virsh net-info default
+        cmd: "virsh net-info {{ virtualization_default_network_name }}"
       register: _virtualization_default_net
       changed_when: false
       failed_when: false
       check_mode: false
 
-    - name: Start default libvirt network
+    - name: Dump existing default libvirt network XML
       ansible.builtin.command:
-        cmd: virsh net-start default
-      when:
-        - _virtualization_default_net.rc == 0
-        - "'Active:' in _virtualization_default_net.stdout"
-        - _virtualization_default_net.stdout is regex('Active:\s+no')
-      changed_when: true
+        cmd: "virsh net-dumpxml {{ virtualization_default_network_name }}"
+      register: _virtualization_default_net_xml
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: _virtualization_default_net.rc == 0
 
-    - name: Enable autostart on default libvirt network
-      ansible.builtin.command:
-        cmd: virsh net-autostart default
-      when:
-        - _virtualization_default_net.rc == 0
-        - "'Autostart:' in _virtualization_default_net.stdout"
-        - _virtualization_default_net.stdout is regex('Autostart:\s+no')
-      changed_when: true
+    - name: Parse existing libvirt network bridge, gateway, and netmask
+      ansible.builtin.set_fact:
+        _virtualization_cur_bridge: >-
+          {{
+            (_virtualization_default_net_xml.stdout | default('') | regex_search("<bridge[^>]*name='([^']+)'", '\1') | default([''], true) | first)
+          }}
+        _virtualization_cur_gateway: >-
+          {{
+            (_virtualization_default_net_xml.stdout | default('') | regex_search("<ip[^>]*address='([^']+)'", '\1') | default([''], true) | first)
+          }}
+        _virtualization_cur_netmask: >-
+          {{
+            (_virtualization_default_net_xml.stdout | default('') | regex_search("<ip[^>]*netmask='([^']+)'", '\1') | default([''], true) | first)
+          }}
 
-    - name: Disable libvirt DHCP on default network when managed externally
-      when:
-        - not (virtualization_default_network_dhcp | bool)
-        - _virtualization_default_net.rc == 0
+    - name: Determine whether default libvirt network must be (re)defined to match inventory 'network'
+      ansible.builtin.set_fact:
+        _virtualization_redefine_default_net: >-
+          {{
+            (_virtualization_default_net.rc != 0)
+            or (_virtualization_cur_bridge != virtualization_default_network_bridge)
+            or (_virtualization_cur_gateway != virtualization_default_network_gateway)
+            or (_virtualization_cur_netmask != virtualization_default_network_netmask)
+          }}
+
+    - name: Define or update default libvirt network from inventory 'network'
+      when: _virtualization_redefine_default_net | bool
       block:
-        - name: Dump default libvirt network XML
+        - name: Render default libvirt network XML definition
+          ansible.builtin.template:
+            src: default-network.xml.j2
+            dest: "/etc/libvirt/homelab-{{ virtualization_default_network_name }}-network.xml"
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: Stop active default libvirt network before redefining bridge/subnet
           ansible.builtin.command:
-            cmd: virsh net-dumpxml default
-          register: _virtualization_default_net_xml
-          changed_when: false
-          check_mode: false
+            cmd: "virsh net-destroy {{ virtualization_default_network_name }}"
+          when:
+            - _virtualization_default_net.rc == 0
+            - _virtualization_default_net.stdout is regex('Active:\s+yes')
+          changed_when: true
 
-        - name: Extract configured DHCP ranges from default libvirt network XML
-          ansible.builtin.set_fact:
-            _virtualization_default_dhcp_ranges: >-
-              {{
-                _virtualization_default_net_xml.stdout
-                | default('')
-                | regex_findall('<range\s+[^>]+/>')
-              }}
+        - name: Define default libvirt network from rendered XML
+          ansible.builtin.command:
+            cmd: "virsh net-define /etc/libvirt/homelab-{{ virtualization_default_network_name }}-network.xml"
+          changed_when: true
 
-        - name: Remove libvirt DHCP ranges from default network (live and persistent)
+        - name: Start newly defined default libvirt network
+          ansible.builtin.command:
+            cmd: "virsh net-start {{ virtualization_default_network_name }}"
+          changed_when: true
+
+        - name: Enable autostart on newly defined default libvirt network
+          ansible.builtin.command:
+            cmd: "virsh net-autostart {{ virtualization_default_network_name }}"
+          changed_when: true
+
+    - name: Ensure existing default libvirt network is active and matches DHCP policy
+      when: not (_virtualization_redefine_default_net | bool)
+      block:
+        - name: Start default libvirt network
+          ansible.builtin.command:
+            cmd: "virsh net-start {{ virtualization_default_network_name }}"
+          when:
+            - "'Active:' in _virtualization_default_net.stdout"
+            - _virtualization_default_net.stdout is regex('Active:\s+no')
+          changed_when: true
+
+        - name: Enable autostart on default libvirt network
+          ansible.builtin.command:
+            cmd: "virsh net-autostart {{ virtualization_default_network_name }}"
+          when:
+            - "'Autostart:' in _virtualization_default_net.stdout"
+            - _virtualization_default_net.stdout is regex('Autostart:\s+no')
+          changed_when: true
+
+        - name: Disable libvirt DHCP on default network when managed externally
+          when: not (virtualization_default_network_dhcp | bool)
+          block:
+            - name: Extract configured DHCP ranges from default libvirt network XML
+              ansible.builtin.set_fact:
+                _virtualization_default_dhcp_ranges: >-
+                  {{
+                    _virtualization_default_net_xml.stdout
+                    | default('')
+                    | regex_findall('<range\s+[^>]+/>')
+                  }}
+
+            - name: Remove libvirt DHCP ranges from default network (live and persistent)
+              ansible.builtin.command:
+                argv:
+                  - virsh
+                  - net-update
+                  - "{{ virtualization_default_network_name }}"
+                  - delete
+                  - ip-dhcp-range
+                  - "{{ item }}"
+                  - --live
+                  - --config
+              loop: "{{ _virtualization_default_dhcp_ranges }}"
+              changed_when: true
+
+        - name: Ensure libvirt DHCP range matches inventory when libvirt DHCP is enabled
+          when:
+            - virtualization_default_network_dhcp | bool
+            - (virtualization_default_network_dhcp_start | length) > 0
+            - (virtualization_default_network_dhcp_end | length) > 0
+            - ("start='" ~ virtualization_default_network_dhcp_start ~ "' end='" ~ virtualization_default_network_dhcp_end ~ "'") not in (_virtualization_default_net_xml.stdout | default(''))
           ansible.builtin.command:
             argv:
               - virsh
               - net-update
-              - default
-              - delete
+              - "{{ virtualization_default_network_name }}"
+              - add
               - ip-dhcp-range
-              - "{{ item }}"
+              - "<range start='{{ virtualization_default_network_dhcp_start }}' end='{{ virtualization_default_network_dhcp_end }}'/>"
               - --live
               - --config
-          loop: "{{ _virtualization_default_dhcp_ranges }}"
           changed_when: true
 
 - name: Configure PCI-Express passthrough (IOMMU and VFIO)

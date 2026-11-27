@@ -13,9 +13,14 @@ metallb_apiserver_manifest: "/etc/kubernetes/manifests/kube-apiserver.yaml"
 # L2 IPAddressPool & L2Advertisement settings
 metallb_pool_name: "homelab-pool"
 metallb_l2_name: "homelab-l2"
-# Leave empty to auto-derive <subnet-prefix>.<start>-<subnet-prefix>.<end> from the target NIC subnet,
-# or set an explicit range/CIDR such as "192.168.122.240-192.168.122.250".
-metallb_address_pool: ""
+# Derived from global inventory 'network.ranges.metallb' when defined;
+# falls back to auto-deriving <subnet-prefix>.<start>-<subnet-prefix>.<end> if empty.
+metallb_address_pool: >-
+  {{
+    (network.ranges.metallb.start ~ '-' ~ network.ranges.metallb.end)
+    if (network is defined and network.ranges is defined and network.ranges.metallb is defined)
+    else ''
+  }}
 metallb_pool_start_octet: 240
 metallb_pool_end_octet: 250
 

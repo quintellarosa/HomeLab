@@ -1,0 +1,405 @@
+---
+- name: Verify global 'network' variable is defined as a mapping
+  ansible.builtin.assert:
+    that:
+      - network is defined
+      - network is mapping
+    fail_msg: >-
+      Global inventory variable 'network' is missing or not a dictionary.
+      Define 'network' under 'all.vars' in inventory.yml.
+
+- name: Gather network facts if not already gathered
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - network
+  when:
+    - network_validation_check_host_lan_overlap | bool
+    - ansible_facts['default_ipv4'] is not defined
+
+- name: Run IPv4 network math validation against 'network' definition
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import ipaddress
+        import json
+        import re
+        import sys
+
+        cfg = json.loads(sys.argv[1])
+        opts = json.loads(sys.argv[2])
+        errors = []
+        warnings = []
+        derived = {}
+
+        # 1. Interface / bridge name check
+        name = cfg.get("name")
+        if not isinstance(name, str) or not name.strip():
+            errors.append("network.name must be a non-empty string (e.g. 'virbr0').")
+        elif len(name) > 15 or not re.match(r"^[a-zA-Z0-9_.-]+$", name):
+            errors.append(
+                f"network.name '{name}' is not a valid Linux interface name "
+                "(max 15 chars, letters/digits/._- only)."
+            )
+
+        # 2. Domain name check
+        domain = cfg.get("domain")
+        if domain is not None:
+            if not isinstance(domain, str) or not domain.strip():
+                errors.append("network.domain must be a non-empty DNS domain string (e.g. 'quintellarosa.home').")
+            else:
+                d = domain.strip().rstrip(".")
+                labels = d.split(".")
+                label_re = re.compile(r"^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$")
+                if len(d) > 253 or len(labels) < 2 or not all(label_re.match(lbl) for lbl in labels):
+                    errors.append(
+                        f"network.domain '{domain}' is not a valid multi-label DNS domain name "
+                        "(e.g. 'quintellarosa.home')."
+                    )
+                elif labels[-1].lower() == "local":
+                    warnings.append(
+                        f"network.domain '{domain}' ends in '.local', which can conflict with Linux mDNS/Avahi."
+                    )
+
+        # 3. Prefix length check
+        prefix = cfg.get("prefix_length")
+        min_p = int(opts["min_prefix"])
+        max_p = int(opts["max_prefix"])
+        prefix_ok = False
+        if isinstance(prefix, bool) or not isinstance(prefix, int):
+            errors.append(
+                f"network.prefix_length must be an integer between {min_p} and {max_p} (got {prefix!r})."
+            )
+        elif not (min_p <= prefix <= max_p):
+            errors.append(
+                f"network.prefix_length '/{prefix}' is out of range ({min_p}..{max_p}). "
+                "Use e.g. 24 (254 usable hosts)."
+            )
+        else:
+            prefix_ok = True
+
+        # 4. Base address & strict CIDR check (network.base + network.prefix_length drive everything)
+        base = cfg.get("base")
+        net = None
+        if not isinstance(base, str) or not base.strip():
+            errors.append("network.base must be a valid IPv4 network address (e.g. '192.168.122.0').")
+        else:
+            try:
+                base_ip = ipaddress.IPv4Address(base)
+            except ipaddress.AddressValueError:
+                errors.append(f"network.base '{base}' is not a valid IPv4 address.")
+                base_ip = None
+
+            if base_ip is not None and prefix_ok:
+                try:
+                    net = ipaddress.IPv4Network(f"{base_ip}/{prefix}", strict=True)
+                except ValueError:
+                    expected_net = ipaddress.IPv4Network(f"{base_ip}/{prefix}", strict=False)
+                    errors.append(
+                        f"network.base '{base}' has non-zero host bits for /{prefix}. "
+                        f"Expected base address: '{expected_net.network_address}'."
+                    )
+
+        if net is not None:
+            derived["cidr"] = str(net)
+            derived["netmask"] = str(net.netmask)
+            derived["broadcast"] = str(net.broadcast_address)
+            derived["first_host"] = str(ipaddress.IPv4Address(int(net.network_address) + 1))
+            derived["last_host"] = str(ipaddress.IPv4Address(int(net.broadcast_address) - 1))
+            derived["usable_hosts"] = net.num_addresses - 2
+
+            # 5. Private RFC 1918 check
+            if opts.get("require_private", True):
+                rfc1918 = [
+                    ipaddress.IPv4Network("10.0.0.0/8"),
+                    ipaddress.IPv4Network("172.16.0.0/12"),
+                    ipaddress.IPv4Network("192.168.0.0/16"),
+                ]
+                if not any(net.subnet_of(p) for p in rfc1918):
+                    errors.append(
+                        f"CIDR '{net}' is not inside RFC 1918 private address space "
+                        "(10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16)."
+                    )
+
+            # 6. Netmask consistency check
+            netmask = cfg.get("netmask")
+            if not isinstance(netmask, str) or not netmask.strip():
+                errors.append(
+                    f"network.netmask is missing; expected '{net.netmask}' for /{prefix}."
+                )
+            else:
+                try:
+                    nm_ip = ipaddress.IPv4Address(netmask)
+                    if str(nm_ip) != str(net.netmask):
+                        errors.append(
+                            f"network.netmask '{netmask}' does not match prefix_length /{prefix} "
+                            f"(expected '{net.netmask}')."
+                        )
+                except ipaddress.AddressValueError:
+                    errors.append(
+                        f"network.netmask '{netmask}' is not a valid IPv4 mask "
+                        f"(expected '{net.netmask}')."
+                    )
+
+            # 7. Gateway check: must be a usable host IP inside CIDR
+            gw = cfg.get("gateway")
+            gw_ip = None
+            if not isinstance(gw, str) or not gw.strip():
+                errors.append(
+                    f"network.gateway is missing; expected a usable host IP in {net} "
+                    f"(e.g. '{derived['first_host']}')."
+                )
+            else:
+                try:
+                    gw_ip = ipaddress.IPv4Address(gw)
+                except ipaddress.AddressValueError:
+                    errors.append(f"network.gateway '{gw}' is not a valid IPv4 address.")
+
+                if gw_ip is not None:
+                    if gw_ip not in net:
+                        errors.append(
+                            f"network.gateway '{gw_ip}' is outside CIDR '{net}' "
+                            f"(usable host range: {derived['first_host']} - {derived['last_host']})."
+                        )
+                    elif gw_ip == net.network_address:
+                        errors.append(
+                            f"network.gateway '{gw_ip}' cannot be the network base address of '{net}'."
+                        )
+                    elif gw_ip == net.broadcast_address:
+                        errors.append(
+                            f"network.gateway '{gw_ip}' cannot be the broadcast address of '{net}'."
+                        )
+
+            # 8. DNS checks (primary & secondary)
+            dns = cfg.get("dns")
+            prim_ip = None
+            sec_ip = None
+            if not isinstance(dns, dict):
+                errors.append("network.dns must be a mapping containing 'primary' (and optionally 'secondary').")
+            else:
+                prim = dns.get("primary")
+                sec = dns.get("secondary")
+
+                if not isinstance(prim, str) or not prim.strip():
+                    errors.append("network.dns.primary must be a valid IPv4 address.")
+                else:
+                    try:
+                        prim_ip = ipaddress.IPv4Address(prim)
+                    except ipaddress.AddressValueError:
+                        errors.append(f"network.dns.primary '{prim}' is not a valid IPv4 address.")
+
+                if prim_ip is not None:
+                    if prim_ip.is_unspecified or prim_ip.is_multicast:
+                        errors.append(f"network.dns.primary '{prim_ip}' is not a valid unicast DNS IP.")
+                    elif prim_ip in net:
+                        if prim_ip == net.network_address:
+                            errors.append(
+                                f"network.dns.primary '{prim_ip}' cannot be the network base address of '{net}'."
+                            )
+                        elif prim_ip == net.broadcast_address:
+                            errors.append(
+                                f"network.dns.primary '{prim_ip}' cannot be the broadcast address of '{net}'."
+                            )
+                        elif gw_ip is not None and prim_ip == gw_ip:
+                            errors.append(
+                                f"network.dns.primary '{prim_ip}' conflicts with network.gateway '{gw_ip}'."
+                            )
+
+                if sec is not None and str(sec).strip() != "":
+                    if not isinstance(sec, str):
+                        errors.append(f"network.dns.secondary must be a valid IPv4 address string (got {sec!r}).")
+                    else:
+                        try:
+                            sec_ip = ipaddress.IPv4Address(sec)
+                        except ipaddress.AddressValueError:
+                            errors.append(f"network.dns.secondary '{sec}' is not a valid IPv4 address.")
+
+                    if sec_ip is not None:
+                        if sec_ip.is_unspecified or sec_ip.is_multicast:
+                            errors.append(f"network.dns.secondary '{sec_ip}' is not a valid unicast DNS IP.")
+                        if prim_ip is not None and sec_ip == prim_ip:
+                            errors.append(
+                                f"network.dns.secondary '{sec_ip}' must differ from network.dns.primary '{prim_ip}'."
+                            )
+                        if sec_ip in net:
+                            if sec_ip == net.network_address:
+                                errors.append(
+                                    f"network.dns.secondary '{sec_ip}' cannot be the network base address of '{net}'."
+                                )
+                            elif sec_ip == net.broadcast_address:
+                                errors.append(
+                                    f"network.dns.secondary '{sec_ip}' cannot be the broadcast address of '{net}'."
+                                )
+                            elif gw_ip is not None and sec_ip == gw_ip:
+                                errors.append(
+                                    f"network.dns.secondary '{sec_ip}' conflicts with network.gateway '{gw_ip}'."
+                                )
+
+            # 9. IP slice ranges validation (inside CIDR, valid bounds, no gateway collision, non-overlapping)
+            ranges = cfg.get("ranges")
+            parsed_ranges = []
+            if ranges is not None:
+                if not isinstance(ranges, dict):
+                    errors.append("network.ranges must be a mapping of named IP ranges (e.g. static, dhcp, metallb).")
+                else:
+                    for rname, rval in ranges.items():
+                        if not isinstance(rval, dict):
+                            errors.append(f"network.ranges.{rname} must be a mapping with 'start' and 'end' IPv4 addresses.")
+                            continue
+                        r_start_raw = rval.get("start")
+                        r_end_raw = rval.get("end")
+                        r_start = None
+                        r_end = None
+                        if not isinstance(r_start_raw, str) or not r_start_raw.strip():
+                            errors.append(f"network.ranges.{rname}.start must be a valid IPv4 address.")
+                        else:
+                            try:
+                                r_start = ipaddress.IPv4Address(r_start_raw)
+                            except ipaddress.AddressValueError:
+                                errors.append(f"network.ranges.{rname}.start '{r_start_raw}' is not a valid IPv4 address.")
+
+                        if not isinstance(r_end_raw, str) or not r_end_raw.strip():
+                            errors.append(f"network.ranges.{rname}.end must be a valid IPv4 address.")
+                        else:
+                            try:
+                                r_end = ipaddress.IPv4Address(r_end_raw)
+                            except ipaddress.AddressValueError:
+                                errors.append(f"network.ranges.{rname}.end '{r_end_raw}' is not a valid IPv4 address.")
+
+                        if r_start is None or r_end is None:
+                            continue
+
+                        if r_start > r_end:
+                            errors.append(
+                                f"network.ranges.{rname} start '{r_start}' must be <= end '{r_end}'."
+                            )
+                            continue
+
+                        for label, addr in (("start", r_start), ("end", r_end)):
+                            if addr not in net:
+                                errors.append(
+                                    f"network.ranges.{rname}.{label} '{addr}' is outside CIDR '{net}'."
+                                )
+                            elif addr == net.network_address:
+                                errors.append(
+                                    f"network.ranges.{rname}.{label} '{addr}' cannot be the network base address of '{net}'."
+                                )
+                            elif addr == net.broadcast_address:
+                                errors.append(
+                                    f"network.ranges.{rname}.{label} '{addr}' cannot be the broadcast address of '{net}'."
+                                )
+
+                        if gw_ip is not None and r_start <= gw_ip <= r_end:
+                            errors.append(
+                                f"network.ranges.{rname} ({r_start}-{r_end}) includes network.gateway '{gw_ip}'."
+                            )
+
+                        if rname in ("dhcp", "metallb"):
+                            for dlabel, dip in (("primary", prim_ip), ("secondary", sec_ip)):
+                                if dip is not None and r_start <= dip <= r_end:
+                                    errors.append(
+                                        f"network.dns.{dlabel} '{dip}' falls inside dynamic range "
+                                        f"network.ranges.{rname} ({r_start}-{r_end}); place internal DNS in the static range."
+                                    )
+
+                        parsed_ranges.append((rname, r_start, r_end))
+
+                    for i in range(len(parsed_ranges)):
+                        n1, s1, e1 = parsed_ranges[i]
+                        for j in range(i + 1, len(parsed_ranges)):
+                            n2, s2, e2 = parsed_ranges[j]
+                            if s1 <= e2 and s2 <= e1:
+                                errors.append(
+                                    f"network.ranges.{n1} ({s1}-{e1}) overlaps with "
+                                    f"network.ranges.{n2} ({s2}-{e2}). Ranges must be disjoint."
+                                )
+
+                    if "metallb" in ranges and all(k in ranges["metallb"] for k in ("start", "end")):
+                        derived["metallb_pool"] = f"{ranges['metallb']['start']}-{ranges['metallb']['end']}"
+
+            # 10. Overlap check against host physical default_ipv4 subnet
+            host_lan = opts.get("host_lan_cidr")
+            host_iface = opts.get("host_lan_iface")
+            if opts.get("check_host_lan_overlap", True) and host_lan and host_iface != name:
+                try:
+                    lan_net = ipaddress.IPv4Network(host_lan, strict=False)
+                    if net.overlaps(lan_net):
+                        errors.append(
+                            f"Virtual CIDR '{net}' overlaps with host physical interface "
+                            f"'{host_iface}' subnet '{lan_net}'. Choose a non-overlapping subnet."
+                        )
+                except ValueError:
+                    pass
+
+            # 11. Overlap check against reserved cluster CIDRs (K8s pods/services)
+            for item in opts.get("reserved_cidrs", []):
+                try:
+                    res_net = ipaddress.IPv4Network(item["cidr"], strict=False)
+                    if net.overlaps(res_net):
+                        errors.append(
+                            f"Virtual CIDR '{net}' overlaps with {item['name']} '{res_net}'. "
+                            "Choose a non-overlapping subnet."
+                        )
+                except (ValueError, KeyError):
+                    pass
+
+        print(json.dumps({"errors": errors, "warnings": warnings, "derived": derived}))
+      - "{{ network | to_json }}"
+      - >-
+        {{
+          {
+            'min_prefix': network_validation_min_prefix,
+            'max_prefix': network_validation_max_prefix,
+            'require_private': network_validation_require_private | bool,
+            'check_host_lan_overlap': network_validation_check_host_lan_overlap | bool,
+            'host_lan_iface': ansible_facts['default_ipv4']['interface'] | default(''),
+            'host_lan_cidr': (
+              ansible_facts['default_ipv4']['network'] ~ '/' ~ ansible_facts['default_ipv4']['prefix']
+              if (ansible_facts['default_ipv4']['network'] is defined and ansible_facts['default_ipv4']['prefix'] is defined)
+              else ''
+            ),
+            'reserved_cidrs': network_validation_reserved_cidrs,
+          } | to_json
+        }}
+  register: _network_validation_raw
+  changed_when: false
+  check_mode: false
+
+- name: Parse network math validation result
+  ansible.builtin.set_fact:
+    _network_validation_result: "{{ _network_validation_raw.stdout | from_json }}"
+
+- name: Display non-fatal network validation warnings
+  ansible.builtin.debug:
+    msg: "WARNING: {{ item }}"
+  loop: "{{ _network_validation_result.warnings | default([]) }}"
+  when: (_network_validation_result.warnings | default([]) | length) > 0
+
+- name: Fail if global 'network' inventory values fail network math validation
+  ansible.builtin.assert:
+    that:
+      - (_network_validation_result.errors | length) == 0
+    fail_msg: |
+      Invalid global 'network' configuration in inventory.yml. Please fix the following issues:
+      {% for err in _network_validation_result.errors %}
+        - {{ err }}
+      {% endfor %}
+
+- name: Publish derived network facts for downstream roles
+  ansible.builtin.set_fact:
+    network_cidr: "{{ _network_validation_result.derived.cidr }}"
+    network_broadcast: "{{ _network_validation_result.derived.broadcast }}"
+    network_first_host: "{{ _network_validation_result.derived.first_host }}"
+    network_last_host: "{{ _network_validation_result.derived.last_host }}"
+    network_usable_hosts: "{{ _network_validation_result.derived.usable_hosts }}"
+    network_metallb_pool: "{{ _network_validation_result.derived.metallb_pool | default('') }}"
+
+- name: Report validated HomeLab virtual network summary
+  ansible.builtin.debug:
+    msg: >-
+      Validated virtual network '{{ network.name }}'{{ ' (domain: ' ~ network.domain ~ ')' if (network.domain is defined and network.domain | length > 0) else '' }}:
+      CIDR {{ network_cidr }} (mask {{ network.netmask }}, gateway {{ network.gateway }},
+      usable hosts {{ network_first_host }}–{{ network_last_host }} [{{ network_usable_hosts }}],
+      DNS {{ network.dns.primary }}{{ ', ' ~ network.dns.secondary if (network.dns.secondary | default('') | length > 0) else '' }}).
