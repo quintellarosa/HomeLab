@@ -1,0 +1,10 @@
+---
+- name: Reload PostgreSQL configuration for AWX
+  ansible.builtin.service:
+    name: "{{ awx_pg_service_name }}"
+    state: reloaded
+
+- name: Restart PostgreSQL service for AWX
+  ansible.builtin.service:
+    name: "{{ awx_pg_service_name }}"
+    state: restarted

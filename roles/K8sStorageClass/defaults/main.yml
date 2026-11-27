@@ -1,0 +1,17 @@
+---
+# Rancher local-path-provisioner release & manifest
+storage_class_version: "v0.0.37"
+storage_class_namespace: "local-path-storage"
+storage_class_name: "local-path"
+storage_class_manifest_url: "https://raw.githubusercontent.com/rancher/local-path-provisioner/{{ storage_class_version }}/deploy/local-path-storage.yaml"
+storage_class_manifest_file: "/etc/kubernetes/local-path-storage.yaml"
+
+# Host directory where dynamic PersistentVolumes are stored
+storage_class_base_path: "/opt/local-path-provisioner"
+
+# Mark 'local-path' as the default StorageClass for PVCs without explicit storageClassName
+storage_class_set_default: true
+
+# Kubernetes control-plane detection paths (kubeadm master)
+storage_class_kubeconfig: "/etc/kubernetes/admin.conf"
+storage_class_apiserver_manifest: "/etc/kubernetes/manifests/kube-apiserver.yaml"

@@ -1,3 +1,0 @@
----
-user_avatar_user: "{{ target_user | default(lookup('ansible.builtin.env', 'SUDO_USER') or lookup('ansible.builtin.env', 'USER'), true) }}"
-user_avatar_file_path: "{{ user_avatar_file | default(role_path ~ '/../../files/user-avatar.jpg', true) }}"

@@ -1,0 +1,95 @@
+---
+- name: Ensure OS family is supported by AWXOperator role
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ['Debian', 'RedHat', 'Suse']
+    fail_msg: "Unsupported OS family '{{ ansible_facts['os_family'] }}' for AWXOperator role (supported: Debian, RedHat, Suse)."
+
+# ---------------------------------------------------------------------------
+# 1. Verify that this host is running a Kubernetes Master (control plane)
+# ---------------------------------------------------------------------------
+- name: Check Kubernetes master files on target host
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ awx_operator_kubeconfig }}"
+    - "{{ awx_operator_apiserver_manifest }}"
+  register: _awx_op_master_files
+
+- name: Check if Kubernetes Master is running on this host
+  ansible.builtin.command:
+    cmd: >-
+      kubectl --kubeconfig {{ awx_operator_kubeconfig }}
+      get nodes -l node-role.kubernetes.io/control-plane
+      --no-headers
+  register: _awx_op_master_running_cmd
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - _awx_op_master_files.results[0].stat.exists
+    - _awx_op_master_files.results[1].stat.exists
+
+- name: Record whether target host has a running Kubernetes Master
+  ansible.builtin.set_fact:
+    _awx_op_has_running_master: >-
+      {{
+        (_awx_op_master_files.results[0].stat.exists | default(false))
+        and (_awx_op_master_files.results[1].stat.exists | default(false))
+        and (_awx_op_master_running_cmd.rc | default(1) == 0)
+        and ((_awx_op_master_running_cmd.stdout | default('') | trim | length) > 0)
+      }}
+
+- name: Skip AWXOperator role when target host does not have a running Kubernetes Master
+  ansible.builtin.debug:
+    msg: >-
+      Skipping AWXOperator role: no running Kubernetes Master (control plane) was detected on this host.
+  when: not (_awx_op_has_running_master | bool)
+
+# ---------------------------------------------------------------------------
+# 2. Deploy AWX Operator via built-in kubectl kustomize
+# ---------------------------------------------------------------------------
+- name: Install AWX Operator {{ awx_operator_version }} into namespace '{{ awx_operator_namespace }}'
+  when: _awx_op_has_running_master | bool
+  block:
+    - name: Ensure AWX Operator kustomize directory exists
+      ansible.builtin.file:
+        path: "{{ awx_operator_kustomize_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Render AWX Operator kustomization.yaml
+      ansible.builtin.template:
+        src: kustomization.yaml.j2
+        dest: "{{ awx_operator_kustomize_dir }}/kustomization.yaml"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply AWX Operator kustomize manifests
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ awx_operator_kubeconfig }}
+          apply -k {{ awx_operator_kustomize_dir }}
+      when: not ansible_check_mode
+      register: _awx_op_apply
+      changed_when: >-
+        ('created' in _awx_op_apply.stdout)
+        or ('configured' in _awx_op_apply.stdout)
+
+    - name: Wait for AWX Operator controller-manager rollout
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ awx_operator_kubeconfig }}
+          -n {{ awx_operator_namespace }}
+          rollout status deployment/awx-operator-controller-manager --timeout=300s
+      when: not ansible_check_mode
+      changed_when: false
+
+    - name: Report AWX Operator setup summary
+      ansible.builtin.debug:
+        msg: >-
+          AWX Operator {{ awx_operator_version }} is active in namespace '{{ awx_operator_namespace }}'.
+      when: _awx_op_apply is changed

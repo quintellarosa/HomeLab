@@ -1,0 +1,33 @@
+---
+apiVersion: awx.ansible.com/v1beta1
+kind: AWX
+metadata:
+  name: {{ awx_name }}
+  namespace: {{ awx_namespace }}
+spec:
+  admin_user: {{ awx_admin_user }}
+  admin_password_secret: {{ awx_admin_password_secret_name }}
+
+  # External unmanaged PostgreSQL database
+  postgres_configuration_secret: {{ awx_pg_secret_name }}
+
+{% if _awx_ca_cert_stat.stat.exists | default(false) %}
+  # Trust HomeLab Private Root CA inside AWX web/task pods
+  bundle_cacert_secret: {{ awx_ca_secret_name }}
+{% endif %}
+
+  # Ingress & TLS via Cilium Ingress + cert-manager
+  ingress_type: ingress
+  ingress_class_name: {{ awx_ingress_class_name }}
+  ingress_hosts:
+    - hostname: {{ awx_hostname }}
+      tls_secret: {{ awx_tls_secret_name }}
+  ingress_annotations: |
+    cert-manager.io/cluster-issuer: {{ awx_cert_manager_issuer }}
+
+  web_replicas: {{ awx_web_replicas }}
+  task_replicas: {{ awx_task_replicas }}
+  projects_persistence: {{ awx_projects_persistence | bool | lower }}
+{% if awx_projects_persistence | bool %}
+  projects_storage_size: {{ awx_projects_storage_size }}
+{% endif %}

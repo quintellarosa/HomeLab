@@ -1,0 +1,195 @@
+---
+- name: Ensure DNS Windows feature is installed
+  ansible.windows.win_feature:
+    name: DNS
+    include_management_tools: true
+    state: present
+  register: _win_dns_feature
+
+- name: Reboot Windows Server if required after installing DNS feature
+  ansible.windows.win_reboot:
+    reboot_timeout: "{{ win_dns_reboot_timeout }}"
+  when:
+    - win_dns_reboot | bool
+    - _win_dns_feature.reboot_required | default(false) | bool
+
+- name: Ensure DNS Server service is enabled and running
+  ansible.windows.win_service:
+    name: DNS
+    start_mode: auto
+    state: started
+  when: not ansible_check_mode
+
+- name: Detect whether this server is an Active Directory Domain Controller
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+      # DomainRole 4 = Backup DC, 5 = Primary DC
+      $Ansible.Result.is_dc = ($cs.DomainRole -in 4, 5)
+  register: _win_dns_dc_check
+  check_mode: false
+
+- name: Determine DNS zone replication mode and reverse lookup zone name
+  ansible.builtin.set_fact:
+    _win_dns_is_dc: "{{ _win_dns_dc_check.result.is_dc | default(false) | bool }}"
+    _win_dns_replication: "{{ 'Domain' if (_win_dns_dc_check.result.is_dc | default(false) | bool) else 'None' }}"
+    _win_dns_dynamic_update: "{{ 'NonsecureAndSecure' }}"
+    _win_dns_octets: "{{ win_dns_network_base.split('.') }}"
+
+- name: Compute authoritative IPv4 reverse lookup zone from network CIDR
+  ansible.builtin.set_fact:
+    _win_dns_reverse_zone: >-
+      {{
+        (_win_dns_octets[2] ~ '.' ~ _win_dns_octets[1] ~ '.' ~ _win_dns_octets[0] ~ '.in-addr.arpa')
+        if (win_dns_prefix_length | int >= 24)
+        else (
+          (_win_dns_octets[1] ~ '.' ~ _win_dns_octets[0] ~ '.in-addr.arpa')
+          if (win_dns_prefix_length | int >= 16)
+          else (_win_dns_octets[0] ~ '.in-addr.arpa')
+        )
+      }}
+
+- name: Ensure authoritative Forward Lookup Zone exists for {{ win_dns_domain }}
+  ansible.windows.win_powershell:
+    parameters:
+      ZoneName: "{{ win_dns_domain }}"
+      IsDc: "{{ _win_dns_is_dc | bool }}"
+      DynamicUpdate: "{{ _win_dns_dynamic_update }}"
+    script: |
+      param([string]$ZoneName, [bool]$IsDc, [string]$DynamicUpdate)
+      $changed = $false
+      $zone = Get-DnsServerZone -Name $ZoneName -ErrorAction SilentlyContinue
+      if (-not $zone) {
+        if (-not $Ansible.CheckMode) {
+          if ($IsDc) {
+            Add-DnsServerPrimaryZone -Name $ZoneName -ReplicationScope Domain -DynamicUpdate $DynamicUpdate -ErrorAction Stop
+          } else {
+            Add-DnsServerPrimaryZone -Name $ZoneName -ZoneFile "$ZoneName.dns" -DynamicUpdate $DynamicUpdate -ErrorAction Stop
+          }
+        }
+        $changed = $true
+      } else {
+        if ($IsDc -and -not $zone.IsDsIntegrated) {
+          if (-not $Ansible.CheckMode) {
+            ConvertTo-DnsServerPrimaryZone -Name $ZoneName -ReplicationScope Domain -Force -ErrorAction Stop
+          }
+          $changed = $true
+        }
+        if ($zone.DynamicUpdate -ne $DynamicUpdate) {
+          if (-not $Ansible.CheckMode) {
+            Set-DnsServerPrimaryZone -Name $ZoneName -DynamicUpdate $DynamicUpdate -ErrorAction Stop
+          }
+          $changed = $true
+        }
+      }
+      $Ansible.Changed = $changed
+
+- name: Ensure authoritative Reverse Lookup Zone exists for {{ _win_dns_reverse_zone }}
+  ansible.windows.win_powershell:
+    parameters:
+      ZoneName: "{{ _win_dns_reverse_zone }}"
+      NetworkId: "{{ win_dns_network_base }}/{{ win_dns_prefix_length }}"
+      IsDc: "{{ _win_dns_is_dc | bool }}"
+      DynamicUpdate: "{{ _win_dns_dynamic_update }}"
+    script: |
+      param([string]$ZoneName, [string]$NetworkId, [bool]$IsDc, [string]$DynamicUpdate)
+      $changed = $false
+      $zone = Get-DnsServerZone -Name $ZoneName -ErrorAction SilentlyContinue
+      if (-not $zone) {
+        if (-not $Ansible.CheckMode) {
+          if ($IsDc) {
+            Add-DnsServerPrimaryZone -NetworkId $NetworkId -ReplicationScope Domain -DynamicUpdate $DynamicUpdate -ErrorAction Stop
+          } else {
+            Add-DnsServerPrimaryZone -NetworkId $NetworkId -ZoneFile "$ZoneName.dns" -DynamicUpdate $DynamicUpdate -ErrorAction Stop
+          }
+        }
+        $changed = $true
+      } else {
+        if ($IsDc -and -not $zone.IsDsIntegrated) {
+          if (-not $Ansible.CheckMode) {
+            ConvertTo-DnsServerPrimaryZone -Name $ZoneName -ReplicationScope Domain -Force -ErrorAction Stop
+          }
+          $changed = $true
+        }
+        if ($zone.DynamicUpdate -ne $DynamicUpdate) {
+          if (-not $Ansible.CheckMode) {
+            Set-DnsServerPrimaryZone -Name $ZoneName -DynamicUpdate $DynamicUpdate -ErrorAction Stop
+          }
+          $changed = $true
+        }
+      }
+      $Ansible.Changed = $changed
+
+- name: Configure upstream DNS forwarders ({{ win_dns_forwarders | join(', ') }})
+  ansible.windows.win_powershell:
+    parameters:
+      DesiredForwarders: "{{ win_dns_forwarders }}"
+    script: |
+      param([string[]]$DesiredForwarders)
+      $current = @((Get-DnsServerForwarder).IPAddress | ForEach-Object { $_.IPAddressToString })
+      $desired = @($DesiredForwarders | Where-Object { $_ -and $_.Trim() -ne '' })
+      $same = ($current.Count -eq $desired.Count) -and (
+        ($current | ForEach-Object { $_ }) -join ',' -eq ($desired | ForEach-Object { $_ }) -join ','
+      )
+      if (-not $same) {
+        if (-not $Ansible.CheckMode) {
+          Set-DnsServerForwarder -IPAddress $desired -UseRootHint $true -ErrorAction Stop
+        }
+        $Ansible.Changed = $true
+      } else {
+        $Ansible.Changed = $false
+      }
+      $Ansible.Result.forwarders = $desired
+  when: (win_dns_forwarders | length) > 0
+
+- name: Ensure wildcard '*' A record points *.{{ win_dns_domain }} to {{ win_dns_wildcard_ip }}
+  ansible.windows.win_dns_record:
+    name: "*"
+    zone: "{{ win_dns_domain }}"
+    type: A
+    value: "{{ win_dns_wildcard_ip }}"
+    state: present
+  when:
+    - win_dns_configure_wildcard | bool
+    - (win_dns_wildcard_ip | default('') | length) > 0
+
+- name: Ensure additional static A records exist in {{ win_dns_domain }}
+  ansible.windows.win_dns_record:
+    name: "{{ item.name }}"
+    zone: "{{ win_dns_domain }}"
+    type: A
+    value: "{{ item.ip }}"
+    state: present
+  loop: "{{ win_dns_static_records }}"
+  loop_control:
+    label: "{{ item.name }}.{{ win_dns_domain }} -> {{ item.ip }}"
+
+- name: Ensure Windows Firewall allows inbound DNS (UDP & TCP 53)
+  ansible.windows.win_powershell:
+    script: |
+      $changed = $false
+      foreach ($proto in @('UDP', 'TCP')) {
+        $ruleName = "HomeLab-DNS-In-$proto"
+        $existing = Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue
+        if (-not $existing) {
+          if (-not $Ansible.CheckMode) {
+            New-NetFirewallRule -Name $ruleName -DisplayName "HomeLab DNS ($proto 53)" `
+              -Direction Inbound -Protocol $proto -LocalPort 53 -Action Allow -Profile Any -Enabled True | Out-Null
+          }
+          $changed = $true
+        } elseif ($existing.Enabled -ne 'True' -or $existing.Action -ne 'Allow') {
+          if (-not $Ansible.CheckMode) {
+            Set-NetFirewallRule -Name $ruleName -Enabled True -Action Allow -Profile Any | Out-Null
+          }
+          $changed = $true
+        }
+      }
+      $Ansible.Changed = $changed
+
+- name: Report DNS Server setup summary
+  ansible.builtin.debug:
+    msg: >-
+      Windows DNS is active on {{ inventory_hostname }}: authoritative for '{{ win_dns_domain }}' and '{{ _win_dns_reverse_zone }}'
+      (replication: {{ _win_dns_replication }}), forwarders: {{ win_dns_forwarders | join(', ') }}
+      {{ ', wildcard *.' ~ win_dns_domain ~ ' -> ' ~ win_dns_wildcard_ip if (win_dns_configure_wildcard | bool and win_dns_wildcard_ip | length > 0) else '' }}.

@@ -1,0 +1,181 @@
+---
+- name: Skip UbuntuGnomeCustomization role on non-Ubuntu hosts
+  ansible.builtin.debug:
+    msg: "Skipping UbuntuGnomeCustomization role (detected distribution: '{{ ansible_facts['distribution'] }}', expected 'Ubuntu')."
+  when: ansible_facts['distribution'] != 'Ubuntu'
+
+- name: Configure Ubuntu GNOME desktop preferences and user avatar
+  when:
+    - ansible_facts['distribution'] == 'Ubuntu'
+    - ubuntu_gnome_user | default('') | length > 0
+  block:
+    - name: Look up target user passwd entry
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ ubuntu_gnome_user }}"
+
+    - name: Extract target user UID, primary GID, and home directory
+      ansible.builtin.set_fact:
+        _ubuntu_gnome_uid: "{{ ansible_facts.getent_passwd[ubuntu_gnome_user][1] }}"
+        _ubuntu_gnome_gid: "{{ ansible_facts.getent_passwd[ubuntu_gnome_user][2] }}"
+        _ubuntu_gnome_home: "{{ ansible_facts.getent_passwd[ubuntu_gnome_user][4] }}"
+
+    # -----------------------------------------------------------------------
+    # 1. GNOME GSettings (appearance, icons, dock, keyboard input sources)
+    # -----------------------------------------------------------------------
+    - name: Check if gsettings binary is installed
+      ansible.builtin.stat:
+        path: /usr/bin/gsettings
+      register: _ubuntu_gnome_gsettings_bin
+
+    - name: List installed GSettings schemas
+      ansible.builtin.command:
+        cmd: /usr/bin/gsettings list-schemas
+      register: _ubuntu_gnome_schemas_cmd
+      changed_when: false
+      check_mode: false
+      when: _ubuntu_gnome_gsettings_bin.stat.exists
+
+    - name: Record available GSettings schemas
+      ansible.builtin.set_fact:
+        _ubuntu_gnome_schemas: "{{ _ubuntu_gnome_schemas_cmd.stdout_lines | default([]) }}"
+
+    - name: Skip GNOME GSettings if GNOME desktop schemas are not installed
+      ansible.builtin.debug:
+        msg: "Skipping GNOME GSettings: schema 'org.gnome.desktop.interface' was not found."
+      when: "'org.gnome.desktop.interface' not in _ubuntu_gnome_schemas"
+
+    - name: Apply Ubuntu GNOME GSettings for target user
+      when:
+        - _ubuntu_gnome_gsettings_bin.stat.exists
+        - "'org.gnome.desktop.interface' in _ubuntu_gnome_schemas"
+      block:
+        - name: Check if target user D-Bus session bus socket is active
+          ansible.builtin.stat:
+            path: "/run/user/{{ _ubuntu_gnome_uid }}/bus"
+          register: _ubuntu_gnome_dbus_socket
+
+        - name: Build gsettings command prefix for target user session
+          ansible.builtin.set_fact:
+            _ubuntu_gnome_gsettings_prefix: >-
+              {{
+                [
+                  '/usr/sbin/runuser', '-u', ubuntu_gnome_user, '--',
+                  '/usr/bin/env',
+                  'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/' ~ _ubuntu_gnome_uid ~ '/bus',
+                  'XDG_RUNTIME_DIR=/run/user/' ~ _ubuntu_gnome_uid,
+                  '/usr/bin/gsettings',
+                ]
+                if (_ubuntu_gnome_dbus_socket.stat.exists | default(false))
+                else [
+                  '/usr/sbin/runuser', '-u', ubuntu_gnome_user, '--',
+                  '/usr/bin/dbus-run-session', '--',
+                  '/usr/bin/gsettings',
+                ]
+              }}
+
+        - name: Filter configured GSettings to schemas installed on this host
+          ansible.builtin.set_fact:
+            _ubuntu_gnome_applicable_settings: >-
+              {{
+                ubuntu_gnome_gsettings
+                | selectattr('schema', 'in', _ubuntu_gnome_schemas)
+                | list
+              }}
+            _ubuntu_gnome_missing_schemas: >-
+              {{
+                ubuntu_gnome_gsettings
+                | map(attribute='schema')
+                | unique
+                | reject('in', _ubuntu_gnome_schemas)
+                | list
+              }}
+
+        - name: Warn about any missing Ubuntu GNOME extension schemas
+          ansible.builtin.debug:
+            msg: >-
+              Some GSettings schemas were not found and will be skipped: {{ _ubuntu_gnome_missing_schemas | join(', ') }}.
+          when: _ubuntu_gnome_missing_schemas | length > 0
+
+        - name: Read current Ubuntu GNOME GSettings values
+          ansible.builtin.command:
+            argv: "{{ _ubuntu_gnome_gsettings_prefix + ['get', item.schema, item.key] }}"
+          loop: "{{ _ubuntu_gnome_applicable_settings }}"
+          loop_control:
+            label: "{{ item.schema }} {{ item.key }}"
+          register: _ubuntu_gnome_current_values
+          changed_when: false
+          check_mode: false
+
+        - name: Apply desired Ubuntu GNOME GSettings values
+          ansible.builtin.command:
+            argv: "{{ _ubuntu_gnome_gsettings_prefix + ['set', item.item.schema, item.item.key, item.item.value | string] }}"
+          loop: "{{ _ubuntu_gnome_current_values.results }}"
+          loop_control:
+            label: "{{ item.item.schema }} {{ item.item.key }} = {{ item.item.value }}"
+          when: (item.stdout | trim) != (item.item.value | string)
+          changed_when: true
+
+    # -----------------------------------------------------------------------
+    # 2. User Avatar (~/.face and AccountsService)
+    # -----------------------------------------------------------------------
+    - name: Check if user avatar file exists
+      ansible.builtin.stat:
+        path: "{{ ubuntu_gnome_avatar_file_path }}"
+      delegate_to: localhost
+      become: false
+      register: _ubuntu_gnome_avatar_stat
+      when: ubuntu_gnome_avatar_file_path | default('') | length > 0
+
+    - name: Install user avatar to ~/.face and AccountsService
+      when:
+        - ubuntu_gnome_avatar_file_path | default('') | length > 0
+        - _ubuntu_gnome_avatar_stat.stat.exists | default(false)
+      block:
+        - name: Copy user avatar to ~/.face
+          ansible.builtin.copy:
+            src: "{{ ubuntu_gnome_avatar_file_path }}"
+            dest: "{{ _ubuntu_gnome_home }}/.face"
+            owner: "{{ ubuntu_gnome_user }}"
+            group: "{{ _ubuntu_gnome_gid }}"
+            mode: "0644"
+
+        - name: Ensure AccountsService directories exist
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            owner: root
+            group: root
+          loop:
+            - /var/lib/AccountsService/icons
+            - /var/lib/AccountsService/users
+
+        - name: Copy user avatar to AccountsService icons
+          ansible.builtin.copy:
+            src: "{{ ubuntu_gnome_avatar_file_path }}"
+            dest: "/var/lib/AccountsService/icons/{{ ubuntu_gnome_user }}"
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: Ensure AccountsService [User] section exists
+          ansible.builtin.lineinfile:
+            path: "/var/lib/AccountsService/users/{{ ubuntu_gnome_user }}"
+            regexp: '^\[User\]$'
+            line: "[User]"
+            insertbefore: BOF
+            create: true
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: Configure AccountsService user icon path
+          ansible.builtin.lineinfile:
+            path: "/var/lib/AccountsService/users/{{ ubuntu_gnome_user }}"
+            regexp: "^Icon="
+            line: "Icon=/var/lib/AccountsService/icons/{{ ubuntu_gnome_user }}"
+            insertafter: '^\[User\]'
+            create: true
+            owner: root
+            group: root
+            mode: "0644"

@@ -1,0 +1,444 @@
+---
+- name: Ensure OS family is supported by AWX role
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ['Debian', 'RedHat', 'Suse']
+    fail_msg: "Unsupported OS family '{{ ansible_facts['os_family'] }}' for AWX role (supported: Debian, RedHat, Suse)."
+
+# ---------------------------------------------------------------------------
+# 1. Verify global 'postgresql' config and running Kubernetes Master + AWX CRD
+# ---------------------------------------------------------------------------
+- name: Verify global 'postgresql' inventory variable is defined
+  ansible.builtin.assert:
+    that:
+      - postgresql is defined
+      - postgresql is mapping
+      - awx_pg_host | default('') | length > 0
+      - awx_pg_database | default('') | length > 0
+      - awx_pg_user | default('') | length > 0
+    fail_msg: >-
+      Global inventory variable 'postgresql' is missing required fields (host, port, databases.awx.name, databases.awx.user).
+
+- name: Check Kubernetes master files on target host
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ awx_kubeconfig }}"
+    - "{{ awx_apiserver_manifest }}"
+  register: _awx_master_files
+
+- name: Check if Kubernetes Master is running on this host
+  ansible.builtin.command:
+    cmd: >-
+      kubectl --kubeconfig {{ awx_kubeconfig }}
+      get nodes -l node-role.kubernetes.io/control-plane
+      --no-headers
+  register: _awx_master_running_cmd
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - _awx_master_files.results[0].stat.exists
+    - _awx_master_files.results[1].stat.exists
+
+- name: Record whether target host has a running Kubernetes Master
+  ansible.builtin.set_fact:
+    _awx_has_running_master: >-
+      {{
+        (_awx_master_files.results[0].stat.exists | default(false))
+        and (_awx_master_files.results[1].stat.exists | default(false))
+        and (_awx_master_running_cmd.rc | default(1) == 0)
+        and ((_awx_master_running_cmd.stdout | default('') | trim | length) > 0)
+      }}
+
+- name: Skip AWX role when target host does not have a running Kubernetes Master
+  ansible.builtin.debug:
+    msg: >-
+      Skipping AWX role: no running Kubernetes Master (control plane) was detected on this host.
+  when: not (_awx_has_running_master | bool)
+
+# ---------------------------------------------------------------------------
+# 2. Provision external PostgreSQL DB/user (if local) and deploy AWX CR
+# ---------------------------------------------------------------------------
+- name: Deploy AWX connected to external PostgreSQL
+  when: _awx_has_running_master | bool
+  block:
+    - name: Verify AWX CRD is installed by AWXOperator
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ awx_kubeconfig }}
+          get crd awxs.awx.ansible.com
+      register: _awx_crd_check
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Assert AWXOperator CRD exists before deploying AWX
+      ansible.builtin.assert:
+        that:
+          - _awx_crd_check.rc == 0
+        fail_msg: >-
+          CRD 'awxs.awx.ansible.com' was not found. Run the AWXOperator role before the AWX role.
+      when: not ansible_check_mode
+
+    - name: Verify AWX database and admin passwords are provided via Ansible Vault
+      ansible.builtin.assert:
+        that:
+          - (awx_pg_password | length) >= 8
+          - (awx_admin_password | length) >= 8
+          - "\"'\" not in awx_pg_password"
+          - "'\"' not in awx_pg_password"
+          - "'\\\\' not in awx_pg_password"
+        fail_msg: >-
+          Missing or invalid AWX passwords ('awx_pg_password' / 'awx_admin_password').
+          Create an encrypted vault file with 'ansible-vault create group_vars/localhost/vault.yml' defining
+          'vault_awx_pg_password' (no quotes or backslashes) and 'vault_awx_admin_password', then run with '--ask-vault-pass'.
+
+    # Provision local host PostgreSQL role & database when postgresql.host points to this host
+    - name: Check if local PostgreSQL server (psql) is installed
+      ansible.builtin.stat:
+        path: /usr/bin/psql
+      register: _awx_local_psql_bin
+
+    - name: Ensure AWX role and database exist on local external PostgreSQL server
+      when:
+        - awx_manage_local_postgres_db | bool
+        - _awx_local_psql_bin.stat.exists
+        - awx_pg_host in (ansible_facts['all_ipv4_addresses'] | default([]) + ['127.0.0.1', 'localhost'])
+        - not ansible_check_mode
+      no_log: true
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import subprocess
+            import sys
+
+            db_user, db_pass, db_name = sys.argv[1:4]
+            changed = False
+
+            def run_psql(sql, dbname="postgres", vars_dict=None):
+                cmd = ["/usr/sbin/runuser", "-u", "postgres", "--", "psql", "-v", "ON_ERROR_STOP=1", "-tA", "-d", dbname]
+                for k, v in (vars_dict or {}).items():
+                    cmd += ["-v", f"{k}={v}"]
+                cmd += ["-c", sql]
+                return subprocess.check_output(cmd, text=True).strip()
+
+            role_exists = run_psql("SELECT 1 FROM pg_roles WHERE rolname = :'u';", vars_dict={"u": db_user})
+            if role_exists != "1":
+                run_psql("CREATE ROLE " + '"' + db_user.replace('"', '""') + '"' + " LOGIN PASSWORD :'p';", vars_dict={"p": db_pass})
+                changed = True
+            else:
+                run_psql("ALTER ROLE " + '"' + db_user.replace('"', '""') + '"' + " WITH LOGIN PASSWORD :'p';", vars_dict={"p": db_pass})
+
+            db_exists = run_psql("SELECT 1 FROM pg_database WHERE datname = :'d';", vars_dict={"d": db_name})
+            if db_exists != "1":
+                run_psql(
+                    'CREATE DATABASE "' + db_name.replace('"', '""') + '" OWNER "' + db_user.replace('"', '""') + '" ENCODING \'UTF8\';'
+                )
+                changed = True
+
+            run_psql('GRANT ALL PRIVILEGES ON DATABASE "' + db_name.replace('"', '""') + '" TO "' + db_user.replace('"', '""') + '";')
+            run_psql('GRANT ALL ON SCHEMA public TO "' + db_user.replace('"', '""') + '";', dbname=db_name)
+
+            print("CHANGED" if changed else "UNCHANGED")
+          - "{{ awx_pg_user }}"
+          - "{{ awx_pg_password }}"
+          - "{{ awx_pg_database }}"
+      register: _awx_pg_provision
+      changed_when: "'CHANGED' in _awx_pg_provision.stdout"
+
+    - name: Allow Kubernetes pod network to reach local PostgreSQL for AWX
+      when:
+        - awx_manage_local_postgres_db | bool
+        - _awx_local_psql_bin.stat.exists
+        - awx_pg_host in (ansible_facts['all_ipv4_addresses'] | default([]) + ['127.0.0.1', 'localhost'])
+      block:
+        - name: Query active PostgreSQL hba_file path
+          ansible.builtin.command:
+            argv:
+              - /usr/sbin/runuser
+              - -u
+              - postgres
+              - --
+              - psql
+              - -tA
+              - -c
+              - "SHOW hba_file;"
+          register: _awx_pg_hba_file_cmd
+          changed_when: false
+          check_mode: false
+
+        - name: Allow AWX pods ({{ awx_pod_network_cidr }}) in PostgreSQL pg_hba.conf
+          ansible.builtin.blockinfile:
+            path: "{{ _awx_pg_hba_file_cmd.stdout | trim }}"
+            marker: "# {mark} ANSIBLE MANAGED BLOCK - HomeLab AWX PostgreSQL access"
+            block: |
+              host    {{ awx_pg_database }}    {{ awx_pg_user }}    {{ awx_pod_network_cidr }}    {{ awx_pg_hba_auth_method }}
+          when: (_awx_pg_hba_file_cmd.stdout | trim | length) > 0
+          notify: Reload PostgreSQL configuration for AWX
+
+        - name: Check if local PostgreSQL is listening on {{ awx_pg_host }}:{{ awx_pg_port }}
+          ansible.builtin.command:
+            cmd: "ss -tlnH sport = :{{ awx_pg_port }}"
+          register: _awx_pg_listen_sockets
+          changed_when: false
+          failed_when: false
+          check_mode: false
+
+        - name: Restart local PostgreSQL if it is not yet listening on {{ awx_pg_host }}:{{ awx_pg_port }}
+          ansible.builtin.service:
+            name: "{{ awx_pg_service_name }}"
+            state: restarted
+          when:
+            - not ansible_check_mode
+            - awx_pg_host not in ['127.0.0.1', 'localhost']
+            - (awx_pg_host ~ ':' ~ (awx_pg_port | string)) not in (_awx_pg_listen_sockets.stdout | default(''))
+            - ('0.0.0.0:' ~ (awx_pg_port | string)) not in (_awx_pg_listen_sockets.stdout | default(''))
+            - ('[::]:' ~ (awx_pg_port | string)) not in (_awx_pg_listen_sockets.stdout | default(''))
+
+        - name: Check if UFW is installed for AWX PostgreSQL firewall rule (Debian)
+          ansible.builtin.stat:
+            path: /usr/sbin/ufw
+          register: _awx_pg_ufw_bin
+          when:
+            - awx_configure_pg_firewall | bool
+            - ansible_facts['os_family'] == 'Debian'
+
+        - name: Allow Kubernetes pod CIDR to reach PostgreSQL port in UFW (Debian)
+          ansible.builtin.command:
+            cmd: >-
+              ufw allow
+              from {{ awx_pod_network_cidr }}
+              to any port {{ awx_pg_port }}
+              proto tcp
+              comment 'HomeLab AWX PostgreSQL'
+          register: _awx_pg_ufw_rule
+          changed_when: >-
+            'Rule added' in _awx_pg_ufw_rule.stdout
+            or 'Rules updated' in _awx_pg_ufw_rule.stdout
+          when:
+            - awx_configure_pg_firewall | bool
+            - ansible_facts['os_family'] == 'Debian'
+            - _awx_pg_ufw_bin.stat.exists | default(false)
+
+        - name: Gather service facts to detect firewalld (RedHat / SUSE)
+          ansible.builtin.service_facts:
+          when:
+            - awx_configure_pg_firewall | bool
+            - ansible_facts['os_family'] in ['RedHat', 'Suse']
+
+        - name: Allow Kubernetes pod CIDR to reach PostgreSQL port in firewalld (RedHat / SUSE)
+          when:
+            - awx_configure_pg_firewall | bool
+            - ansible_facts['os_family'] in ['RedHat', 'Suse']
+            - "'firewalld.service' in ansible_facts.services"
+            - ansible_facts.services['firewalld.service'].state == 'running'
+          block:
+            - name: Set firewalld rich rule for AWX pod access to PostgreSQL
+              ansible.builtin.set_fact:
+                _awx_pg_firewalld_rule: >-
+                  rule family="ipv4" source address="{{ awx_pod_network_cidr }}" port port="{{ awx_pg_port }}" protocol="tcp" accept
+
+            - name: Check whether AWX PostgreSQL rich rule exists in firewalld
+              ansible.builtin.command:
+                argv:
+                  - firewall-cmd
+                  - --permanent
+                  - "--query-rich-rule={{ _awx_pg_firewalld_rule }}"
+              register: _awx_pg_firewalld_query
+              changed_when: false
+              failed_when: false
+              check_mode: false
+
+            - name: Add AWX PostgreSQL rich rule to firewalld
+              ansible.builtin.command:
+                argv:
+                  - firewall-cmd
+                  - --permanent
+                  - "--add-rich-rule={{ _awx_pg_firewalld_rule }}"
+              when: _awx_pg_firewalld_query.rc != 0
+              changed_when: true
+              register: _awx_pg_firewalld_added
+
+            - name: Reload firewalld to apply AWX PostgreSQL rule
+              ansible.builtin.command:
+                cmd: firewall-cmd --reload
+              when: _awx_pg_firewalld_added is changed
+              changed_when: true
+
+        - name: Flush PostgreSQL handlers before deploying AWX
+          ansible.builtin.meta: flush_handlers
+
+    - name: Ensure AWX namespace exists
+      ansible.builtin.shell:
+        cmd: >-
+          kubectl --kubeconfig {{ awx_kubeconfig }} create namespace {{ awx_namespace }}
+          --dry-run=client -o yaml
+          | kubectl --kubeconfig {{ awx_kubeconfig }} apply -f -
+      when: not ansible_check_mode
+      register: _awx_ns_apply
+      changed_when: "'created' in _awx_ns_apply.stdout"
+
+    - name: Create or update external PostgreSQL Secret for AWX (type=unmanaged)
+      when: not ansible_check_mode
+      no_log: true
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json
+            import subprocess
+            import sys
+
+            kubeconfig, ns, name, host, port, db, user, pw, sslmode = sys.argv[1:10]
+            secret = {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {"name": name, "namespace": ns},
+                "type": "Opaque",
+                "stringData": {
+                    "host": host,
+                    "port": str(port),
+                    "database": db,
+                    "username": user,
+                    "password": pw,
+                    "sslmode": sslmode,
+                    "type": "unmanaged",
+                },
+            }
+            out = subprocess.check_output(
+                ["kubectl", "--kubeconfig", kubeconfig, "apply", "-f", "-"],
+                input=json.dumps(secret),
+                text=True,
+            )
+            print(out.strip())
+          - "{{ awx_kubeconfig }}"
+          - "{{ awx_namespace }}"
+          - "{{ awx_pg_secret_name }}"
+          - "{{ awx_pg_host }}"
+          - "{{ awx_pg_port | string }}"
+          - "{{ awx_pg_database }}"
+          - "{{ awx_pg_user }}"
+          - "{{ awx_pg_password }}"
+          - "{{ awx_pg_sslmode }}"
+      register: _awx_pg_secret_apply
+      changed_when: >-
+        ('created' in _awx_pg_secret_apply.stdout)
+        or ('configured' in _awx_pg_secret_apply.stdout)
+
+    - name: Create or update AWX admin password Secret
+      when: not ansible_check_mode
+      no_log: true
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json
+            import subprocess
+            import sys
+
+            kubeconfig, ns, name, pw = sys.argv[1:5]
+            secret = {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {"name": name, "namespace": ns},
+                "type": "Opaque",
+                "stringData": {"password": pw},
+            }
+            out = subprocess.check_output(
+                ["kubectl", "--kubeconfig", kubeconfig, "apply", "-f", "-"],
+                input=json.dumps(secret),
+                text=True,
+            )
+            print(out.strip())
+          - "{{ awx_kubeconfig }}"
+          - "{{ awx_namespace }}"
+          - "{{ awx_admin_password_secret_name }}"
+          - "{{ awx_admin_password }}"
+      register: _awx_admin_secret_apply
+      changed_when: >-
+        ('created' in _awx_admin_secret_apply.stdout)
+        or ('configured' in _awx_admin_secret_apply.stdout)
+
+    - name: Check if HomeLab Root CA certificate file exists for AWX trust bundle
+      ansible.builtin.stat:
+        path: "{{ awx_ca_cert_file }}"
+      register: _awx_ca_cert_stat
+
+    - name: Create or update AWX custom CA bundle Secret from HomeLab Root CA
+      ansible.builtin.shell:
+        cmd: >-
+          kubectl --kubeconfig {{ awx_kubeconfig }}
+          -n {{ awx_namespace }} create secret generic {{ awx_ca_secret_name }}
+          --from-file=bundle-ca.crt={{ awx_ca_cert_file }}
+          --dry-run=client -o yaml
+          | kubectl --kubeconfig {{ awx_kubeconfig }} apply -f -
+      when:
+        - _awx_ca_cert_stat.stat.exists
+        - not ansible_check_mode
+      register: _awx_ca_secret_apply
+      changed_when: >-
+        ('created' in _awx_ca_secret_apply.stdout)
+        or ('configured' in _awx_ca_secret_apply.stdout)
+
+    - name: Ensure AWX manifest directory exists
+      ansible.builtin.file:
+        path: "{{ awx_manifest_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Render AWX Custom Resource manifest
+      ansible.builtin.template:
+        src: awx.yaml.j2
+        dest: "{{ awx_manifest_dir }}/{{ awx_name }}.yaml"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply AWX Custom Resource
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ awx_kubeconfig }}
+          apply -f {{ awx_manifest_dir }}/{{ awx_name }}.yaml
+      when: not ansible_check_mode
+      register: _awx_cr_apply
+      changed_when: >-
+        ('created' in _awx_cr_apply.stdout)
+        or ('configured' in _awx_cr_apply.stdout)
+
+    - name: Wait for AWX web deployment to be created by AWX Operator
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ awx_kubeconfig }}
+          -n {{ awx_namespace }} get deployment {{ awx_name }}-web
+      register: _awx_web_deploy_exists
+      retries: 60
+      delay: 10
+      until: _awx_web_deploy_exists.rc == 0
+      when: not ansible_check_mode
+      changed_when: false
+
+    - name: Wait for AWX web and task deployments to roll out
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ awx_kubeconfig }}
+          -n {{ awx_namespace }} rollout status deployment/{{ item }} --timeout=600s
+      loop:
+        - "{{ awx_name }}-web"
+        - "{{ awx_name }}-task"
+      when: not ansible_check_mode
+      changed_when: false
+
+    - name: Report AWX deployment summary
+      ansible.builtin.debug:
+        msg: >-
+          AWX is deployed in namespace '{{ awx_namespace }}' connected to external PostgreSQL
+          {{ awx_pg_host }}:{{ awx_pg_port }}/{{ awx_pg_database }} (user: {{ awx_pg_user }}).
+          Web UI: https://{{ awx_hostname }} (admin user: {{ awx_admin_user }}).
+      when: _awx_cr_apply is changed

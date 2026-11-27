@@ -1,0 +1,33 @@
+---
+# Authoritative domain and network values derived from global inventory 'network'
+win_dns_domain: "{{ network.domain }}"
+win_dns_network_base: "{{ network.base }}"
+win_dns_prefix_length: "{{ network.prefix_length | int }}"
+
+# Upstream DNS forwarders for non-local internet queries.
+# Uses network.dns.secondary (8.8.8.8) plus optional Cloudflare (1.1.1.1) for redundancy.
+win_dns_extra_forwarders:
+  - "1.1.1.1"
+win_dns_forwarders: >-
+  {{
+    (
+      ([network.dns.secondary] if (network.dns.secondary | default('') | length > 0) else [])
+      + (win_dns_extra_forwarders | default([]))
+    ) | unique | list
+  }}
+
+# Wildcard '*' A record pointing *.quintellarosa.home to Cilium Ingress (MetalLB start IP)
+win_dns_configure_wildcard: true
+win_dns_wildcard_ip: >-
+  {{
+    network.ranges.metallb.start
+    if (network.ranges is defined and network.ranges.metallb is defined)
+    else ''
+  }}
+
+# Additional static A records (list of {name, ip} dicts) to ensure in the forward zone
+win_dns_static_records: []
+
+# Allow automatic reboot if installing the DNS feature requires one
+win_dns_reboot: true
+win_dns_reboot_timeout: 600

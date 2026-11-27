@@ -1,0 +1,9 @@
+---
+# Non-sensitive group vars for localhost (workstation / Kubernetes apps).
+# Store sensitive app passwords in an Ansible Vault encrypted file:
+#   ansible-vault create group_vars/localhost/vault.yml
+#
+# Note: Per AWX Operator docs, avoid single quotes ('), double quotes ("), or backslashes (\)
+# in vault_awx_pg_password.
+awx_pg_password: "{{ vault_awx_pg_password | default('') }}"
+awx_admin_password: "{{ vault_awx_admin_password | default('') }}"

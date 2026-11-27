@@ -1,0 +1,15 @@
+---
+# Active Directory forest / domain settings derived from global inventory 'network'
+win_ad_domain_name: "{{ network.domain }}"
+# NetBIOS name must be <= 15 chars, single label (defaults to uppercase first label of network.domain)
+win_ad_netbios_name: "{{ (network.domain.split('.')[0][:15]) | upper }}"
+
+# Provided via Ansible Vault (group_vars/DmnCtl/vault.yml -> vault_win_ad_safe_mode_password)
+win_ad_safe_mode_password: "{{ vault_win_ad_safe_mode_password | default('') }}"
+
+# Let AD DS promotion install/integrate DNS cleanly
+win_ad_install_dns: true
+
+# Automatically handle Windows Server reboots required by feature install or DC promotion
+win_ad_reboot: true
+win_ad_reboot_timeout: 600

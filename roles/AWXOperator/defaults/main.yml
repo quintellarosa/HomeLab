@@ -1,0 +1,10 @@
+---
+# AWX Operator release & deployment settings
+awx_operator_version: "2.19.1"
+awx_operator_namespace: "awx"
+awx_operator_image: "quay.io/ansible/awx-operator"
+awx_operator_kustomize_dir: "/etc/kubernetes/awx-operator"
+
+# Kubernetes control-plane detection paths (kubeadm master)
+awx_operator_kubeconfig: "/etc/kubernetes/admin.conf"
+awx_operator_apiserver_manifest: "/etc/kubernetes/manifests/kube-apiserver.yaml"

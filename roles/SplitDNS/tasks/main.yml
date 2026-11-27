@@ -1,0 +1,166 @@
+---
+- name: Ensure OS family is supported by SplitDNS role
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ['Debian', 'RedHat', 'Suse']
+    fail_msg: "Unsupported OS family '{{ ansible_facts['os_family'] }}' for SplitDNS role (supported: Debian, RedHat, Suse)."
+
+- name: Verify split-DNS network parameters are defined
+  ansible.builtin.assert:
+    that:
+      - split_dns_domain | default('') | length > 0
+      - split_dns_server | default('') | length > 0
+      - split_dns_interface | default('') | length > 0
+    fail_msg: "network.domain, network.dns.primary, and network.name must be defined in inventory.yml."
+
+# ---------------------------------------------------------------------------
+# 1. Host OS Split-DNS via systemd-resolved (scoped strictly to virtual bridge)
+# ---------------------------------------------------------------------------
+- name: Gather service facts to detect systemd-resolved
+  ansible.builtin.service_facts:
+
+- name: Configure systemd-resolved per-link split-DNS for ~{{ split_dns_domain }} -> {{ split_dns_server }}
+  when:
+    - split_dns_configure_host_resolved | bool
+    - "'systemd-resolved.service' in ansible_facts.services"
+    - ansible_facts.services['systemd-resolved.service'].state == 'running'
+  block:
+    - name: Install persistent homelab-split-dns systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/homelab-split-dns.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Configure HomeLab split-DNS on {{ split_dns_interface }} for ~{{ split_dns_domain }}
+          After=systemd-resolved.service libvirtd.service virtnetworkd.service network-online.target
+          Wants=systemd-resolved.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/sh -c 'for i in $(seq 1 30); do ip link show dev {{ split_dns_interface }} >/dev/null 2>&1 && break; sleep 1; done; resolvectl dns {{ split_dns_interface }} {{ split_dns_server }} && resolvectl domain {{ split_dns_interface }} ~{{ split_dns_domain }} && resolvectl default-route {{ split_dns_interface }} false'
+
+          [Install]
+          WantedBy=multi-user.target
+      notify:
+        - Reload systemd daemon
+        - Restart homelab-split-dns
+
+    - name: Flush handlers to reload systemd unit if updated
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable and start homelab-split-dns service
+      ansible.builtin.systemd_service:
+        name: homelab-split-dns.service
+        enabled: true
+        state: started
+      when: not ansible_check_mode
+
+# ---------------------------------------------------------------------------
+# 2. Kubernetes CoreDNS Split-DNS (only when a K8s Master is running on host)
+# ---------------------------------------------------------------------------
+- name: Configure Kubernetes CoreDNS split-DNS forwarder
+  when: split_dns_configure_coredns | bool
+  block:
+    - name: Check Kubernetes master files on host
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ split_dns_kubeconfig }}"
+        - "{{ split_dns_apiserver_manifest }}"
+      register: _split_dns_k8s_files
+
+    - name: Check if Kubernetes Master is running on this host
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ split_dns_kubeconfig }}
+          get nodes -l node-role.kubernetes.io/control-plane --no-headers
+      register: _split_dns_k8s_running
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when:
+        - _split_dns_k8s_files.results[0].stat.exists
+        - _split_dns_k8s_files.results[1].stat.exists
+
+    - name: Patch kube-system/coredns Corefile with split-DNS block for {{ split_dns_domain }}
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json
+            import re
+            import subprocess
+            import sys
+
+            kubeconfig, domain, dns_server, check_mode = sys.argv[1:5]
+            begin = "# BEGIN ANSIBLE MANAGED BLOCK - HomeLab Split-DNS"
+            end = "# END ANSIBLE MANAGED BLOCK - HomeLab Split-DNS"
+            desired_block = "\n".join([
+                begin,
+                domain + ":53 {",
+                "    errors",
+                "    cache 30",
+                "    forward . " + dns_server,
+                "}",
+                end,
+            ])
+
+            cm_raw = subprocess.check_output(
+                ["kubectl", "--kubeconfig", kubeconfig, "-n", "kube-system", "get", "configmap", "coredns", "-o", "json"],
+                text=True,
+            )
+            cm = json.loads(cm_raw)
+            cur_corefile = cm["data"]["Corefile"]
+
+            pattern = re.compile(re.escape(begin) + r".*?" + re.escape(end), re.DOTALL)
+            if pattern.search(cur_corefile):
+                new_corefile = pattern.sub(desired_block, cur_corefile)
+            else:
+                new_corefile = cur_corefile.rstrip() + "\n\n" + desired_block + "\n"
+
+            if new_corefile.strip() == cur_corefile.strip():
+                print("UNCHANGED")
+                sys.exit(0)
+
+            if check_mode == "true":
+                print("CHANGED")
+                sys.exit(0)
+
+            patch = json.dumps({"data": {"Corefile": new_corefile}})
+            subprocess.check_call(
+                ["kubectl", "--kubeconfig", kubeconfig, "-n", "kube-system", "patch", "configmap", "coredns", "--type=merge", "-p", patch],
+                stdout=subprocess.DEVNULL,
+            )
+            print("CHANGED")
+          - "{{ split_dns_kubeconfig }}"
+          - "{{ split_dns_domain }}"
+          - "{{ split_dns_server }}"
+          - "{{ ansible_check_mode | bool | lower }}"
+      register: _split_dns_coredns_patch
+      changed_when: "'CHANGED' in _split_dns_coredns_patch.stdout"
+      check_mode: false
+      when:
+        - _split_dns_k8s_files.results[0].stat.exists
+        - _split_dns_k8s_files.results[1].stat.exists
+        - _split_dns_k8s_running.rc | default(1) == 0
+
+    - name: Restart CoreDNS deployment to apply updated Corefile immediately
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ split_dns_kubeconfig }}
+          -n kube-system rollout restart deployment/coredns
+      when:
+        - _split_dns_coredns_patch is changed
+        - not ansible_check_mode
+      changed_when: true
+
+- name: Report SplitDNS setup summary
+  ansible.builtin.debug:
+    msg: >-
+      Split-DNS configured: '*.{{ split_dns_domain }}' queries route to {{ split_dns_server }}
+      (host link {{ split_dns_interface }} via systemd-resolved, and Kubernetes CoreDNS when active),
+      while all other domains continue using default internet DNS.

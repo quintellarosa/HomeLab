@@ -1,0 +1,13 @@
+---
+# Split-DNS settings derived from global inventory 'network' object
+split_dns_domain: "{{ network.domain }}"
+split_dns_server: "{{ network.dns.primary }}"
+split_dns_interface: "{{ network.name }}"
+
+# Configure host systemd-resolved per-link split-DNS (~<domain> -> <dns.primary> on <network.name>)
+split_dns_configure_host_resolved: true
+
+# Configure Kubernetes CoreDNS split-DNS forwarder when a K8s Master is running on this host
+split_dns_configure_coredns: true
+split_dns_kubeconfig: "/etc/kubernetes/admin.conf"
+split_dns_apiserver_manifest: "/etc/kubernetes/manifests/kube-apiserver.yaml"

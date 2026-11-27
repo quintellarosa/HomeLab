@@ -1,0 +1,183 @@
+---
+- name: Ensure OS family is supported by K8sStorageClass role
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ['Debian', 'RedHat', 'Suse']
+    fail_msg: "Unsupported OS family '{{ ansible_facts['os_family'] }}' for K8sStorageClass role (supported: Debian, RedHat, Suse)."
+
+# ---------------------------------------------------------------------------
+# 1. Verify that this host is running a Kubernetes Master (control plane)
+# ---------------------------------------------------------------------------
+- name: Check Kubernetes master files on target host
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ storage_class_kubeconfig }}"
+    - "{{ storage_class_apiserver_manifest }}"
+  register: _storage_class_master_files
+
+- name: Check if Kubernetes Master is running on this host
+  ansible.builtin.command:
+    cmd: >-
+      kubectl --kubeconfig {{ storage_class_kubeconfig }}
+      get nodes -l node-role.kubernetes.io/control-plane
+      --no-headers
+  register: _storage_class_master_running_cmd
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - _storage_class_master_files.results[0].stat.exists
+    - _storage_class_master_files.results[1].stat.exists
+
+- name: Record whether target host has a running Kubernetes Master
+  ansible.builtin.set_fact:
+    _storage_class_has_running_master: >-
+      {{
+        (_storage_class_master_files.results[0].stat.exists | default(false))
+        and (_storage_class_master_files.results[1].stat.exists | default(false))
+        and (_storage_class_master_running_cmd.rc | default(1) == 0)
+        and ((_storage_class_master_running_cmd.stdout | default('') | trim | length) > 0)
+      }}
+
+- name: Skip K8sStorageClass role when target host does not have a running Kubernetes Master
+  ansible.builtin.debug:
+    msg: >-
+      Skipping K8sStorageClass role: no running Kubernetes Master (control plane) was detected on this host.
+  when: not (_storage_class_has_running_master | bool)
+
+# ---------------------------------------------------------------------------
+# 2. Install Rancher local-path-provisioner and configure default StorageClass
+# ---------------------------------------------------------------------------
+- name: Install and configure local-path StorageClass on Kubernetes Master
+  when: _storage_class_has_running_master | bool
+  block:
+    - name: Ensure local-path storage base directory exists on host
+      ansible.builtin.file:
+        path: "{{ storage_class_base_path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download Rancher local-path-provisioner {{ storage_class_version }} manifest
+      ansible.builtin.get_url:
+        url: "{{ storage_class_manifest_url }}"
+        dest: "{{ storage_class_manifest_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply Rancher local-path-provisioner {{ storage_class_version }} manifest
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ storage_class_kubeconfig }}
+          apply -f {{ storage_class_manifest_file }}
+      when: not ansible_check_mode
+      register: _storage_class_manifest_apply
+      changed_when: >-
+        ('created' in _storage_class_manifest_apply.stdout)
+        or ('configured' in _storage_class_manifest_apply.stdout)
+
+    - name: Ensure local-path-config ConfigMap points to {{ storage_class_base_path }}
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json
+            import subprocess
+            import sys
+
+            kubeconfig, namespace, base_path, check_mode = sys.argv[1:5]
+            cm_raw = subprocess.check_output(
+                ["kubectl", "--kubeconfig", kubeconfig, "-n", namespace, "get", "configmap", "local-path-config", "-o", "json"],
+                text=True,
+            )
+            cm = json.loads(cm_raw)
+            cur_cfg = json.loads(cm["data"]["config.json"])
+            desired_cfg = {
+                "nodePathMap": [
+                    {
+                        "node": "DEFAULT_PATH_FOR_NON_LISTED_NODES",
+                        "paths": [base_path],
+                    }
+                ]
+            }
+            if cur_cfg == desired_cfg:
+                print("UNCHANGED")
+                sys.exit(0)
+            if check_mode == "true":
+                print("CHANGED")
+                sys.exit(0)
+            patch = json.dumps({"data": {"config.json": json.dumps(desired_cfg, indent=2)}})
+            subprocess.check_call(
+                ["kubectl", "--kubeconfig", kubeconfig, "-n", namespace, "patch", "configmap", "local-path-config", "--type=merge", "-p", patch],
+                stdout=subprocess.DEVNULL,
+            )
+            print("CHANGED")
+          - "{{ storage_class_kubeconfig }}"
+          - "{{ storage_class_namespace }}"
+          - "{{ storage_class_base_path }}"
+          - "{{ ansible_check_mode | bool | lower }}"
+      register: _storage_class_cfg_patch
+      changed_when: "'CHANGED' in _storage_class_cfg_patch.stdout"
+      when: not ansible_check_mode
+
+    - name: Restart local-path-provisioner after base path change
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ storage_class_kubeconfig }}
+          -n {{ storage_class_namespace }}
+          rollout restart deployment/local-path-provisioner
+      when:
+        - _storage_class_cfg_patch is changed
+        - not ansible_check_mode
+      changed_when: true
+
+    - name: Wait for local-path-provisioner deployment rollout
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ storage_class_kubeconfig }}
+          -n {{ storage_class_namespace }}
+          rollout status deployment/local-path-provisioner --timeout=180s
+      when: not ansible_check_mode
+      changed_when: false
+
+    - name: Check whether StorageClass '{{ storage_class_name }}' is already default
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ storage_class_kubeconfig }}
+          get storageclass {{ storage_class_name }}
+          -o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}'
+      register: _storage_class_is_default
+      changed_when: false
+      failed_when: false
+      when:
+        - storage_class_set_default | bool
+        - not ansible_check_mode
+
+    - name: Mark StorageClass '{{ storage_class_name }}' as cluster default
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ storage_class_kubeconfig }}"
+          - patch
+          - storageclass
+          - "{{ storage_class_name }}"
+          - -p
+          - '{ "metadata": { "annotations": { "storageclass.kubernetes.io/is-default-class": "true" } } }'
+      when:
+        - storage_class_set_default | bool
+        - not ansible_check_mode
+        - (_storage_class_is_default.stdout | default('') | trim) != 'true'
+      register: _storage_class_default_patch
+      changed_when: true
+
+    - name: Report StorageClass setup summary
+      ansible.builtin.debug:
+        msg: >-
+          StorageClass '{{ storage_class_name }}' (Rancher local-path-provisioner {{ storage_class_version }})
+          is active (default: {{ storage_class_set_default }}, host path: {{ storage_class_base_path }}).
+      when: (_storage_class_manifest_apply is changed) or (_storage_class_default_patch is changed)

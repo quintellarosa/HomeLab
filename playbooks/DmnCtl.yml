@@ -1,0 +1,18 @@
+---
+# Validate global 'network' inventory math locally before modifying Domain Controller
+- name: Validate HomeLab network configuration
+  hosts: localhost
+  become: false
+  gather_facts: true
+  roles:
+    - NetworkValidation
+
+# Configure Windows Server 2025 Domain Controller core services (AD DS -> DNS -> DHCP)
+# Run with: ansible-playbook playbooks/DmnCtl.yml --ask-vault-pass
+- name: Configure Domain Controller (AD DS, DNS, and DHCP)
+  hosts: DmnCtl
+  gather_facts: true
+  roles:
+    - WinSvrAD
+    - WinSvrDNS
+    - WinSvrDHCP

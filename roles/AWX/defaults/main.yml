@@ -1,0 +1,46 @@
+---
+# AWX instance identity & namespace
+awx_name: "awx"
+awx_namespace: "awx"
+awx_manifest_dir: "/etc/kubernetes/awx"
+
+# AWX web UI & TLS settings (follows global inventory 'network.domain')
+awx_hostname: "awx.{{ network.domain }}"
+awx_ingress_class_name: "cilium"
+awx_cert_manager_issuer: "homelab-ca"
+awx_tls_secret_name: "{{ awx_name }}-tls-secret"
+
+# AWX admin account (password provided via group_vars/localhost/vault.yml -> vault_awx_admin_password)
+awx_admin_user: "admin"
+awx_admin_password: "{{ vault_awx_admin_password | default('') }}"
+awx_admin_password_secret_name: "{{ awx_name }}-admin-password"
+
+# External PostgreSQL connection settings (derived from global inventory 'postgresql' object)
+awx_pg_host: "{{ postgresql.host }}"
+awx_pg_port: "{{ postgresql.port | default(5432) }}"
+awx_pg_database: "{{ postgresql.databases.awx.name | default('awx') }}"
+awx_pg_user: "{{ postgresql.databases.awx.user | default('awx') }}"
+awx_pg_sslmode: "{{ postgresql.sslmode | default('prefer') }}"
+awx_pg_password: "{{ vault_awx_pg_password | default('') }}"
+awx_pg_secret_name: "{{ awx_name }}-postgres-configuration"
+
+# Automatically ensure the AWX role, database, pg_hba.conf, and firewall allow K8s pods when postgresql.host is local
+awx_manage_local_postgres_db: true
+awx_pod_network_cidr: "{{ kubernetes_pod_network_cidr | default('10.244.0.0/16') }}"
+awx_pg_hba_auth_method: "scram-sha-256"
+awx_pg_service_name: "postgresql"
+awx_configure_pg_firewall: true
+
+# Inject HomeLab Root CA into AWX pods (for HTTPS GitLab/internal endpoints)
+awx_ca_cert_file: "/etc/kubernetes/homelab-root-ca.crt"
+awx_ca_secret_name: "{{ awx_name }}-custom-cacert"
+
+# AWX sizing & persistence (tuned for single-node HomeLab workstation)
+awx_web_replicas: 1
+awx_task_replicas: 1
+awx_projects_persistence: true
+awx_projects_storage_size: "8Gi"
+
+# Kubernetes control-plane detection paths (kubeadm master)
+awx_kubeconfig: "/etc/kubernetes/admin.conf"
+awx_apiserver_manifest: "/etc/kubernetes/manifests/kube-apiserver.yaml"

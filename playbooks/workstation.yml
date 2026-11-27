@@ -16,8 +16,7 @@
     - NetworkValidation
     #- Bluetooth
     - EssentialTools
-    - UbuntuGnome
-    - UserAvatar
+    - UbuntuGnomeCustomization
     - GoogleChrome
     - GoogleAntigravityIDE
     - Thunderbird
@@ -25,7 +24,11 @@
     - Virtualization
     - PostgreSQL
     - Docker
-    - Kubernetes
-    - Cilium
-    - MetalLB
-    - CertManager
+    - K8sMasterInstall
+    - K8sCNICilium
+    - K8sMetalLB
+    - K8sCertManager
+    - SplitDNS
+    - K8sStorageClass
+    - AWXOperator
+    - AWX

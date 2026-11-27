@@ -1,0 +1,7 @@
+---
+# Non-sensitive group vars for Domain Controller (DmnCtl) hosts.
+# Store the DSRM Safe Mode Administrator password in an Ansible Vault encrypted file:
+#   ansible-vault create group_vars/DmnCtl/vault.yml
+# with:
+#   vault_win_ad_safe_mode_password: "YourStrongDSRMPassword!123"
+win_ad_safe_mode_password: "{{ vault_win_ad_safe_mode_password | default('') }}"

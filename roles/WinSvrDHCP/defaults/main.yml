@@ -1,0 +1,24 @@
+---
+# DHCP IPv4 scope and options derived from global inventory 'network'
+win_dhcp_scope_name: "HomeLab Virtual Network"
+win_dhcp_scope_description: "Managed by Ansible from inventory network definition"
+win_dhcp_scope_id: "{{ network.base }}"
+win_dhcp_subnet_mask: "{{ network.netmask }}"
+win_dhcp_start_range: "{{ network.ranges.dhcp.start }}"
+win_dhcp_end_range: "{{ network.ranges.dhcp.end }}"
+win_dhcp_lease_duration: "8.00:00:00"
+
+# Scope Options
+# Option 3: Default Gateway (Router)
+win_dhcp_router: "{{ network.gateway }}"
+# Option 6: DNS Servers
+# Best practice for AD & split-DNS: advertise ONLY the internal Windows DNS server to clients,
+# and let Windows DNS forward external lookups to 8.8.8.8 / 1.1.1.1 so clients never bypass internal DNS.
+win_dhcp_dns_servers:
+  - "{{ network.dns.primary }}"
+# Option 15: DNS Domain Name
+win_dhcp_dns_domain: "{{ network.domain }}"
+
+# Allow automatic reboot if installing the DHCP feature requires one
+win_dhcp_reboot: true
+win_dhcp_reboot_timeout: 600

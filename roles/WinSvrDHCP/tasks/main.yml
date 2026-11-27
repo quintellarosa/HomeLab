@@ -1,0 +1,176 @@
+---
+- name: Ensure DHCP Windows feature is installed
+  ansible.windows.win_feature:
+    name: DHCP
+    include_management_tools: true
+    state: present
+  register: _win_dhcp_feature
+
+- name: Reboot Windows Server if required after installing DHCP feature
+  ansible.windows.win_reboot:
+    reboot_timeout: "{{ win_dhcp_reboot_timeout }}"
+  when:
+    - win_dhcp_reboot | bool
+    - _win_dhcp_feature.reboot_required | default(false) | bool
+
+- name: Complete DHCP post-install security groups and Server Manager state
+  ansible.windows.win_powershell:
+    script: |
+      $changed = $false
+      $regPath = 'HKLM:\SOFTWARE\Microsoft\ServerManager\Roles\12'
+      $state = (Get-ItemProperty -Path $regPath -Name ConfigurationState -ErrorAction SilentlyContinue).ConfigurationState
+      if ($state -ne 2) {
+        if (-not $Ansible.CheckMode) {
+          Add-DhcpServerSecurityGroup -ErrorAction SilentlyContinue
+          if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+          Set-ItemProperty -Path $regPath -Name ConfigurationState -Value 2
+        }
+        $changed = $true
+      }
+      $Ansible.Changed = $changed
+
+- name: Authorize DHCP Server in Active Directory when running on a Domain Controller
+  ansible.windows.win_powershell:
+    parameters:
+      ServerIp: "{{ network.dns.primary }}"
+    script: |
+      param([string]$ServerIp)
+      $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+      $isDc = ($cs.DomainRole -in 4, 5)
+      if (-not $isDc) {
+        $Ansible.Changed = $false
+        $Ansible.Result.ad_authorized = 'skipped_not_dc'
+        return
+      }
+      $fqdn = ([System.Net.Dns]::GetHostEntry($env:COMPUTERNAME)).HostName
+      $existing = @(Get-DhcpServerInDC -ErrorAction SilentlyContinue | Where-Object {
+        $_.IPAddress.IPAddressToString -eq $ServerIp -or $_.DnsName -ieq $fqdn
+      })
+      if ($existing.Count -eq 0) {
+        if (-not $Ansible.CheckMode) {
+          Add-DhcpServerInDC -DnsName $fqdn -IPAddress $ServerIp -ErrorAction Stop
+        }
+        $Ansible.Changed = $true
+        $Ansible.Result.ad_authorized = 'authorized'
+      } else {
+        $Ansible.Changed = $false
+        $Ansible.Result.ad_authorized = 'already_authorized'
+      }
+
+- name: Ensure DHCPServer service is enabled and running
+  ansible.windows.win_service:
+    name: DHCPServer
+    start_mode: auto
+    state: started
+  when: not ansible_check_mode
+
+- name: Ensure default IPv4 DHCP scope matches inventory network and is Active
+  ansible.windows.win_powershell:
+    parameters:
+      ScopeId: "{{ win_dhcp_scope_id }}"
+      ScopeName: "{{ win_dhcp_scope_name }}"
+      ScopeDescription: "{{ win_dhcp_scope_description }}"
+      StartRange: "{{ win_dhcp_start_range }}"
+      EndRange: "{{ win_dhcp_end_range }}"
+      SubnetMask: "{{ win_dhcp_subnet_mask }}"
+      LeaseDuration: "{{ win_dhcp_lease_duration }}"
+    script: |
+      param(
+        [string]$ScopeId,
+        [string]$ScopeName,
+        [string]$ScopeDescription,
+        [string]$StartRange,
+        [string]$EndRange,
+        [string]$SubnetMask,
+        [string]$LeaseDuration
+      )
+      $changed = $false
+      $lease = [TimeSpan]::Parse($LeaseDuration)
+      $scope = Get-DhcpServerv4Scope -ScopeId $ScopeId -ErrorAction SilentlyContinue
+
+      if (-not $scope) {
+        if (-not $Ansible.CheckMode) {
+          Add-DhcpServerv4Scope `
+            -Name $ScopeName `
+            -Description $ScopeDescription `
+            -StartRange $StartRange `
+            -EndRange $EndRange `
+            -SubnetMask $SubnetMask `
+            -LeaseDuration $lease `
+            -State Active `
+            -ErrorAction Stop
+        }
+        $changed = $true
+      } else {
+        $needsUpdate = (
+          $scope.StartRange.IPAddressToString -ne $StartRange -or
+          $scope.EndRange.IPAddressToString -ne $EndRange -or
+          $scope.State -ne 'Active' -or
+          $scope.LeaseDuration -ne $lease
+        )
+        if ($needsUpdate) {
+          if (-not $Ansible.CheckMode) {
+            Set-DhcpServerv4Scope `
+              -ScopeId $ScopeId `
+              -StartRange $StartRange `
+              -EndRange $EndRange `
+              -LeaseDuration $lease `
+              -State Active `
+              -ErrorAction Stop
+          }
+          $changed = $true
+        }
+      }
+      $Ansible.Changed = $changed
+
+- name: Configure DHCP IPv4 scope options (Router, DNS Server, DNS Domain) from inventory
+  ansible.windows.win_powershell:
+    parameters:
+      ScopeId: "{{ win_dhcp_scope_id }}"
+      RouterIp: "{{ win_dhcp_router }}"
+      DnsServers: "{{ win_dhcp_dns_servers }}"
+      DnsDomain: "{{ win_dhcp_dns_domain }}"
+    script: |
+      param(
+        [string]$ScopeId,
+        [string]$RouterIp,
+        [string[]]$DnsServers,
+        [string]$DnsDomain
+      )
+      $changed = $false
+
+      # Option 3: Router / Default Gateway
+      $curRouter = @((Get-DhcpServerv4OptionValue -ScopeId $ScopeId -OptionId 3 -ErrorAction SilentlyContinue).Value)
+      if (($curRouter -join ',') -ne $RouterIp) {
+        if (-not $Ansible.CheckMode) {
+          Set-DhcpServerv4OptionValue -ScopeId $ScopeId -Router $RouterIp -ErrorAction Stop
+        }
+        $changed = $true
+      }
+
+      # Option 6: DNS Servers
+      $curDns = @((Get-DhcpServerv4OptionValue -ScopeId $ScopeId -OptionId 6 -ErrorAction SilentlyContinue).Value)
+      if (($curDns -join ',') -ne ($DnsServers -join ',')) {
+        if (-not $Ansible.CheckMode) {
+          Set-DhcpServerv4OptionValue -ScopeId $ScopeId -DnsServer $DnsServers -Force -ErrorAction Stop
+        }
+        $changed = $true
+      }
+
+      # Option 15: DNS Domain Name
+      $curDom = @((Get-DhcpServerv4OptionValue -ScopeId $ScopeId -OptionId 15 -ErrorAction SilentlyContinue).Value)
+      if (($curDom -join ',') -ne $DnsDomain) {
+        if (-not $Ansible.CheckMode) {
+          Set-DhcpServerv4OptionValue -ScopeId $ScopeId -DnsDomain $DnsDomain -ErrorAction Stop
+        }
+        $changed = $true
+      }
+
+      $Ansible.Changed = $changed
+
+- name: Report DHCP Server setup summary
+  ansible.builtin.debug:
+    msg: >-
+      Windows DHCP is active on {{ inventory_hostname }}: scope {{ win_dhcp_scope_id }}
+      ({{ win_dhcp_start_range }}–{{ win_dhcp_end_range }}, mask {{ win_dhcp_subnet_mask }}),
+      router {{ win_dhcp_router }}, DNS {{ win_dhcp_dns_servers | join(', ') }}, domain {{ win_dhcp_dns_domain }}.

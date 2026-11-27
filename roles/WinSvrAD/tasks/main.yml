@@ -1,0 +1,77 @@
+---
+- name: Verify required network.domain is defined for WinSvrAD
+  ansible.builtin.assert:
+    that:
+      - win_ad_domain_name is defined
+      - (win_ad_domain_name | length) > 0
+    fail_msg: "network.domain must be defined in inventory.yml before running WinSvrAD."
+
+- name: Ensure AD-Domain-Services Windows feature is installed
+  ansible.windows.win_feature:
+    name: AD-Domain-Services
+    include_management_tools: true
+    state: present
+  register: _win_ad_feature
+
+- name: Reboot Windows Server if required after installing AD-Domain-Services
+  ansible.windows.win_reboot:
+    reboot_timeout: "{{ win_ad_reboot_timeout }}"
+  when:
+    - win_ad_reboot | bool
+    - _win_ad_feature.reboot_required | default(false) | bool
+
+- name: Check whether Active Directory forest/domain is already configured
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      try {
+        $dom = Get-ADDomain -ErrorAction Stop
+        $Ansible.Result.configured = $true
+        $Ansible.Result.dns_root = $dom.DNSRoot
+        $Ansible.Result.netbios_name = $dom.NetBIOSName
+      } catch {
+        $Ansible.Result.configured = $false
+      }
+  register: _win_ad_status
+  check_mode: false
+
+- name: Verify DSRM Safe Mode password is provided before creating new AD forest
+  ansible.builtin.assert:
+    that:
+      - win_ad_safe_mode_password is defined
+      - (win_ad_safe_mode_password | length) >= 8
+    fail_msg: >-
+      Active Directory is not yet configured and 'win_ad_safe_mode_password' is missing or too short.
+      Create an encrypted vault file with 'ansible-vault create group_vars/DmnCtl/vault.yml' defining
+      'vault_win_ad_safe_mode_password', then run the playbook with '--ask-vault-pass'.
+  when: not (_win_ad_status.result.configured | default(false) | bool)
+
+- name: Create new Active Directory forest and promote Domain Controller
+  microsoft.ad.domain:
+    dns_domain_name: "{{ win_ad_domain_name }}"
+    domain_netbios_name: "{{ win_ad_netbios_name }}"
+    safe_mode_password: "{{ win_ad_safe_mode_password }}"
+    install_dns: "{{ win_ad_install_dns | bool }}"
+    reboot: "{{ win_ad_reboot | bool }}"
+    reboot_timeout: "{{ win_ad_reboot_timeout }}"
+  register: _win_ad_promote
+  no_log: true
+  when: not (_win_ad_status.result.configured | default(false) | bool)
+
+- name: Ensure Active Directory services (NTDS, ADWS, Netlogon) are enabled and running
+  ansible.windows.win_service:
+    name: "{{ item }}"
+    start_mode: auto
+    state: started
+  loop:
+    - NTDS
+    - ADWS
+    - Netlogon
+  when:
+    - not ansible_check_mode
+    - (_win_ad_status.result.configured | default(false) | bool) or (_win_ad_promote is changed)
+
+- name: Report Active Directory setup summary
+  ansible.builtin.debug:
+    msg: >-
+      Active Directory forest '{{ win_ad_domain_name }}' (NetBIOS: {{ win_ad_netbios_name }}) is active on {{ inventory_hostname }}.
