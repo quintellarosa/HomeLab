@@ -296,6 +296,45 @@
     group: root
     mode: "0755"
 
+- name: Read Kubernetes API server URL from kubeconfig for kube-proxy replacement
+  ansible.builtin.command:
+    cmd: >-
+      kubectl --kubeconfig {{ cilium_kubeconfig }}
+      config view --minify
+      -o jsonpath='{.clusters[0].cluster.server}'
+  register: _cilium_k8s_server_url
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - cilium_kube_proxy_replacement | bool
+    - _cilium_kubeconfig_stat.stat.exists
+
+- name: Resolve Kubernetes API server host and port for Cilium
+  ansible.builtin.set_fact:
+    _cilium_resolved_k8s_host: >-
+      {{
+        cilium_k8s_service_host
+        if (cilium_k8s_service_host | default('') | length > 0)
+        else (
+          (_cilium_k8s_server_url.stdout | default('') | trim)
+          | regex_replace('^https?://([^:/]+).*$', '\1')
+        )
+      }}
+    _cilium_resolved_k8s_port: >-
+      {{
+        cilium_k8s_service_port
+        if (cilium_k8s_service_port | default('') | string | length > 0)
+        else (
+          (
+            (_cilium_k8s_server_url.stdout | default('') | trim)
+            | regex_replace('^https?://[^:]+:([0-9]+).*$', '\1')
+          )
+          if (':' in ((_cilium_k8s_server_url.stdout | default('') | trim) | regex_replace('^https?://', '')))
+          else '6443'
+        )
+      }}
+
 - name: Render Cilium Helm values file
   ansible.builtin.template:
     src: cilium-values.yaml.j2
@@ -318,6 +357,24 @@
       delay: 5
       until: _cilium_api_ready.rc == 0
       changed_when: false
+
+    - name: Remove default kube-proxy DaemonSet when Cilium kube-proxy replacement is enabled
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ cilium_kubeconfig }}
+          -n kube-system delete daemonset kube-proxy --ignore-not-found
+      register: _cilium_kube_proxy_ds_del
+      changed_when: "'deleted' in _cilium_kube_proxy_ds_del.stdout"
+      when: cilium_kube_proxy_replacement | bool
+
+    - name: Remove default kube-proxy ConfigMap when Cilium kube-proxy replacement is enabled
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ cilium_kubeconfig }}
+          -n kube-system delete configmap kube-proxy --ignore-not-found
+      register: _cilium_kube_proxy_cm_del
+      changed_when: "'deleted' in _cilium_kube_proxy_cm_del.stdout"
+      when: cilium_kube_proxy_replacement | bool
 
     - name: Check whether Cilium DaemonSet is already installed
       ansible.builtin.command:
@@ -384,5 +441,7 @@
         msg: >-
           Cilium {{ cilium_version }} (CLI {{ cilium_cli_version }}) is active in namespace '{{ cilium_namespace }}'
           (IPAM: {{ cilium_ipam_mode }}, routing: {{ cilium_routing_mode }}/{{ cilium_tunnel_protocol }},
+          kubeProxyReplacement: {{ cilium_kube_proxy_replacement }},
+          Ingress: {{ cilium_ingress_enabled }}/{{ cilium_ingress_loadbalancer_mode }},
           operator replicas: {{ cilium_operator_replicas }}, Hubble: {{ cilium_hubble_enabled }}).
       when: (_cilium_installed is changed) or (_cilium_upgraded is changed)

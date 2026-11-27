@@ -10,6 +10,18 @@ ipam:
 routingMode: {{ cilium_routing_mode }}
 tunnelProtocol: {{ cilium_tunnel_protocol }}
 kubeProxyReplacement: {{ cilium_kube_proxy_replacement | bool | lower }}
+{% if (cilium_kube_proxy_replacement | bool) and (_cilium_resolved_k8s_host | default('') | length > 0) %}
+k8sServiceHost: "{{ _cilium_resolved_k8s_host }}"
+k8sServicePort: {{ _cilium_resolved_k8s_port | int }}
+{% endif %}
+{% if cilium_ingress_enabled | bool %}
+envoy:
+  enabled: true
+ingressController:
+  enabled: true
+  default: {{ cilium_ingress_default | bool | lower }}
+  loadbalancerMode: {{ cilium_ingress_loadbalancer_mode }}
+{% endif %}
 operator:
   replicas: {{ cilium_operator_replicas }}
 hubble:

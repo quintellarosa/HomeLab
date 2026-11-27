@@ -19,8 +19,16 @@ cilium_cluster_pool_ipv4_mask_size: 24
 cilium_routing_mode: "tunnel"
 cilium_tunnel_protocol: "vxlan"
 
-# Keep false alongside standard kubeadm kube-proxy; set true if kubeadm skipped kube-proxy.
-cilium_kube_proxy_replacement: false
+# eBPF kube-proxy replacement (required for Cilium's built-in Ingress Controller)
+cilium_kube_proxy_replacement: true
+# Leave empty to auto-detect from cilium_kubeconfig server URL
+cilium_k8s_service_host: ""
+cilium_k8s_service_port: ""
+
+# Cilium built-in Envoy Ingress Controller (shared LoadBalancer IP via MetalLB)
+cilium_ingress_enabled: true
+cilium_ingress_default: true
+cilium_ingress_loadbalancer_mode: "shared"
 
 # 1 replica for single-node homelab clusters; increase to 2+ for HA multi-node clusters.
 cilium_operator_replicas: 1
@@ -36,7 +44,7 @@ cilium_libvirt_network_name: "default"
 
 # Firewall rules (UFW on Debian, firewalld on RedHat/SUSE)
 cilium_configure_firewall: true
-cilium_firewall_ports:
+cilium_firewall_base_ports:
   - port: "4240"
     proto: "tcp"
     comment: "HomeLab Cilium health"
@@ -46,3 +54,17 @@ cilium_firewall_ports:
   - port: "8472"
     proto: "udp"
     comment: "HomeLab Cilium VXLAN"
+
+cilium_firewall_ingress_ports:
+  - port: "80"
+    proto: "tcp"
+    comment: "HomeLab Cilium Ingress HTTP"
+  - port: "443"
+    proto: "tcp"
+    comment: "HomeLab Cilium Ingress HTTPS"
+
+cilium_firewall_ports: >-
+  {{
+    cilium_firewall_base_ports
+    + (cilium_firewall_ingress_ports if (cilium_ingress_enabled | bool) else [])
+  }}

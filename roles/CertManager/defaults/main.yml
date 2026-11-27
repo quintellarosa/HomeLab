@@ -1,0 +1,44 @@
+---
+cert_manager_user: "{{ target_user | default(lookup('ansible.builtin.env', 'SUDO_USER') or lookup('ansible.builtin.env', 'USER'), true) }}"
+
+# cert-manager release & manifests
+cert_manager_version: "v1.21.3"
+cert_manager_namespace: "cert-manager"
+cert_manager_manifest_url: "https://github.com/cert-manager/cert-manager/releases/download/{{ cert_manager_version }}/cert-manager.yaml"
+cert_manager_manifest_file: "/etc/kubernetes/cert-manager.yaml"
+cert_manager_ca_config_file: "/etc/kubernetes/cert-manager-homelab-ca.yaml"
+cert_manager_ca_cert_file: "/etc/kubernetes/homelab-root-ca.crt"
+
+# Kubernetes control-plane detection paths (kubeadm master)
+cert_manager_kubeconfig: "/etc/kubernetes/admin.conf"
+cert_manager_apiserver_manifest: "/etc/kubernetes/manifests/kube-apiserver.yaml"
+
+# Private HomeLab Root CA & ClusterIssuer
+cert_manager_domain: "quintellarosa.home"
+cert_manager_bootstrap_issuer_name: "homelab-selfsigned-bootstrap"
+cert_manager_ca_cert_name: "homelab-root-ca"
+cert_manager_ca_secret_name: "homelab-root-ca-secret"
+cert_manager_ca_issuer_name: "homelab-ca"
+cert_manager_ca_common_name: "{{ cert_manager_domain }} Root CA"
+cert_manager_ca_organization: "HomeLab"
+cert_manager_ca_duration: "87600h"
+cert_manager_ca_renew_before: "8760h"
+
+# Publish Root CA ConfigMap inside the cluster so pods (Backstage, AWX, GitLab) can trust it
+cert_manager_publish_cluster_configmap: true
+cert_manager_cluster_configmap_namespace: "kube-public"
+cert_manager_cluster_configmap_name: "homelab-root-ca"
+
+# Local host & Google Chrome trust store integration
+cert_manager_trust_os_ca: true
+cert_manager_trust_chrome_nss: true
+
+cert_manager_os_ca_dest_by_family:
+  Debian: "/usr/local/share/ca-certificates/homelab-root-ca.crt"
+  RedHat: "/etc/pki/ca-trust/source/anchors/homelab-root-ca.crt"
+  Suse: "/etc/pki/trust/anchors/homelab-root-ca.crt"
+
+cert_manager_nss_package_by_family:
+  Debian: "libnss3-tools"
+  RedHat: "nss-tools"
+  Suse: "mozilla-nss-tools"
