@@ -30,4 +30,5 @@ spec:
   projects_persistence: {{ awx_projects_persistence | bool | lower }}
 {% if awx_projects_persistence | bool %}
   projects_storage_size: {{ awx_projects_storage_size }}
+  projects_storage_access_mode: {{ awx_projects_storage_access_mode }}
 {% endif %}

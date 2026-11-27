@@ -4,6 +4,8 @@
   hosts: localhost
   become: true
   gather_facts: true
+  vars_files:
+    - ../vault/vault.yml
 
   pre_tasks:
     - name: Verify OS family is supported

@@ -12,6 +12,8 @@
 - name: Configure Domain Controller (AD DS, DNS, and DHCP)
   hosts: DmnCtl
   gather_facts: true
+  vars_files:
+    - ../vault/vault.yml
   roles:
     - WinSvrAD
     - WinSvrDNS

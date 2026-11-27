@@ -1,6 +1,0 @@
----
-# Copy/create the encrypted vault file with:
-#   ansible-vault create group_vars/DmnCtl/vault.yml
-#
-# Then paste the variable below inside the encrypted vault file:
-vault_win_ad_safe_mode_password: "CHANGE_ME_StrongDsrmPassword!2026"

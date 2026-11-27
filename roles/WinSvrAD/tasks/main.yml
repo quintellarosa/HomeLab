@@ -42,7 +42,7 @@
       - (win_ad_safe_mode_password | length) >= 8
     fail_msg: >-
       Active Directory is not yet configured and 'win_ad_safe_mode_password' is missing or too short.
-      Create an encrypted vault file with 'ansible-vault create group_vars/DmnCtl/vault.yml' defining
+      Create or edit the encrypted vault file 'vault/vault.yml' (ansible-vault edit vault/vault.yml) defining
       'vault_win_ad_safe_mode_password', then run the playbook with '--ask-vault-pass'.
   when: not (_win_ad_status.result.configured | default(false) | bool)
 

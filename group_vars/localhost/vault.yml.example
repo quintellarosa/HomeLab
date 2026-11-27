@@ -1,8 +1,0 @@
----
-# Create the encrypted vault file with:
-#   ansible-vault create group_vars/localhost/vault.yml
-#
-# Then paste the variables below inside the encrypted vault file
-# (do NOT include ', ", or \ in vault_awx_pg_password):
-vault_awx_pg_password: "CHANGE_ME_StrongAwxDbPass2026"
-vault_awx_admin_password: "CHANGE_ME_StrongAwxAdmin2026"

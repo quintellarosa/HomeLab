@@ -3,6 +3,9 @@
 awx_operator_version: "2.19.1"
 awx_operator_namespace: "awx"
 awx_operator_image: "quay.io/ansible/awx-operator"
+# Override retired gcr.io/kubebuilder/kube-rbac-proxy with upstream Quay image
+awx_operator_rbac_proxy_image: "quay.io/brancz/kube-rbac-proxy"
+awx_operator_rbac_proxy_tag: "v0.15.0"
 awx_operator_kustomize_dir: "/etc/kubernetes/awx-operator"
 
 # Kubernetes control-plane detection paths (kubeadm master)

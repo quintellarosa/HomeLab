@@ -7,3 +7,6 @@ resources:
 images:
   - name: {{ awx_operator_image }}
     newTag: "{{ awx_operator_version }}"
+  - name: gcr.io/kubebuilder/kube-rbac-proxy
+    newName: {{ awx_operator_rbac_proxy_image }}
+    newTag: "{{ awx_operator_rbac_proxy_tag }}"

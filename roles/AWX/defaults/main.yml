@@ -10,7 +10,7 @@ awx_ingress_class_name: "cilium"
 awx_cert_manager_issuer: "homelab-ca"
 awx_tls_secret_name: "{{ awx_name }}-tls-secret"
 
-# AWX admin account (password provided via group_vars/localhost/vault.yml -> vault_awx_admin_password)
+# AWX admin account (password provided via vault/vault.yml -> vault_awx_admin_password)
 awx_admin_user: "admin"
 awx_admin_password: "{{ vault_awx_admin_password | default('') }}"
 awx_admin_password_secret_name: "{{ awx_name }}-admin-password"
@@ -40,6 +40,7 @@ awx_web_replicas: 1
 awx_task_replicas: 1
 awx_projects_persistence: true
 awx_projects_storage_size: "8Gi"
+awx_projects_storage_access_mode: "ReadWriteOnce"
 
 # Kubernetes control-plane detection paths (kubeadm master)
 awx_kubeconfig: "/etc/kubernetes/admin.conf"
