@@ -140,12 +140,40 @@
   when: not (_postgresql_use_preferred_nic | bool)
   notify: Reload systemd daemon
 
+- name: Check if UFW is installed (Debian)
+  ansible.builtin.stat:
+    path: /usr/sbin/ufw
+  register: _postgresql_ufw_bin
+  when:
+    - postgresql_configure_firewall | bool
+    - ansible_facts['os_family'] == 'Debian'
+
+- name: Open PostgreSQL port in UFW for {{ _postgresql_target_interface }} (Debian)
+  ansible.builtin.command:
+    cmd: >-
+      ufw allow in on {{ _postgresql_target_interface }}
+      from {{ _postgresql_allowed_cidr }}
+      to any port {{ postgresql_port }}
+      proto tcp
+      comment 'HomeLab PostgreSQL'
+  register: _postgresql_ufw_rule
+  changed_when: >-
+    'Rule added' in _postgresql_ufw_rule.stdout
+    or 'Rules updated' in _postgresql_ufw_rule.stdout
+  when:
+    - postgresql_configure_firewall | bool
+    - ansible_facts['os_family'] == 'Debian'
+    - _postgresql_ufw_bin.stat.exists | default(false)
+    - _postgresql_bind_address not in ['127.0.0.1', 'localhost']
+
 - name: Gather service facts to detect firewalld
   ansible.builtin.service_facts:
 
-- name: Open PostgreSQL port in firewalld for {{ _postgresql_target_interface }}
+- name: Open PostgreSQL port in firewalld for {{ _postgresql_target_interface }} (RedHat / SUSE)
   when:
-    - postgresql_configure_firewalld | bool
+    - postgresql_configure_firewall | bool
+    - ansible_facts['os_family'] in ['RedHat', 'Suse']
+    - _postgresql_bind_address not in ['127.0.0.1', 'localhost']
     - "'firewalld.service' in ansible_facts.services"
     - ansible_facts.services['firewalld.service'].state == 'running'
   block:

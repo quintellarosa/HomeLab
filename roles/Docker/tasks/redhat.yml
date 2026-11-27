@@ -1,0 +1,37 @@
+---
+- name: Determine Docker RedHat-family repository path
+  ansible.builtin.set_fact:
+    _docker_redhat_distro: >-
+      {{
+        'fedora' if ansible_facts['distribution'] == 'Fedora'
+        else ('rhel' if ansible_facts['distribution'] == 'RedHat' else 'centos')
+      }}
+
+- name: Remove conflicting legacy Docker packages on RedHat family
+  ansible.builtin.package:
+    name:
+      - docker
+      - docker-client
+      - docker-client-latest
+      - docker-common
+      - docker-latest
+      - docker-latest-logrotate
+      - docker-logrotate
+      - docker-engine
+      - podman-docker
+    state: absent
+
+- name: Import Docker official RPM GPG key
+  ansible.builtin.rpm_key:
+    key: "https://download.docker.com/linux/{{ _docker_redhat_distro }}/gpg"
+    state: present
+
+- name: Add Docker CE Stable YUM/DNF repository
+  ansible.builtin.yum_repository:
+    name: docker-ce-stable
+    description: Docker CE Stable - $basearch
+    baseurl: "https://download.docker.com/linux/{{ _docker_redhat_distro }}/$releasever/$basearch/stable"
+    enabled: true
+    gpgcheck: true
+    gpgkey: "https://download.docker.com/linux/{{ _docker_redhat_distro }}/gpg"
+    state: present

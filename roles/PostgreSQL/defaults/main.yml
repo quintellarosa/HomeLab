@@ -3,7 +3,7 @@ postgresql_preferred_interface: virbr0
 postgresql_port: 5432
 postgresql_hba_auth_method: scram-sha-256
 postgresql_service_name: postgresql
-postgresql_configure_firewalld: true
+postgresql_configure_firewall: true
 
 postgresql_packages_by_family:
   Debian:

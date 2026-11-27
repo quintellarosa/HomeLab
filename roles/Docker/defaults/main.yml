@@ -1,0 +1,22 @@
+---
+docker_user: "{{ target_user | default(lookup('ansible.builtin.env', 'SUDO_USER') or lookup('ansible.builtin.env', 'USER'), true) }}"
+docker_manage_user_group: true
+
+docker_packages_by_family:
+  Debian:
+    - docker-ce
+    - docker-ce-cli
+    - containerd.io
+    - docker-buildx-plugin
+    - docker-compose-plugin
+  RedHat:
+    - docker-ce
+    - docker-ce-cli
+    - containerd.io
+    - docker-buildx-plugin
+    - docker-compose-plugin
+  Suse:
+    - docker
+    - docker-compose
+
+docker_packages: "{{ docker_packages_by_family[ansible_facts['os_family']] | default([]) }}"

@@ -1,0 +1,60 @@
+---
+- name: Ensure OS family is supported by Docker role
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ['Debian', 'RedHat', 'Suse']
+    fail_msg: "Unsupported OS family '{{ ansible_facts['os_family'] }}' for Docker role (supported: Debian, RedHat, Suse)."
+
+- name: Configure Docker official repository on Debian family
+  ansible.builtin.include_tasks: debian.yml
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Configure Docker official repository on RedHat family
+  ansible.builtin.include_tasks: redhat.yml
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Install Docker packages
+  ansible.builtin.package:
+    name: "{{ docker_packages }}"
+    state: present
+
+- name: Gather systemd service facts for Docker
+  ansible.builtin.service_facts:
+
+- name: Enable and start containerd service if present
+  ansible.builtin.service:
+    name: containerd
+    enabled: true
+    state: started
+  when: "'containerd.service' in ansible_facts.services"
+
+- name: Enable and start Docker service
+  ansible.builtin.service:
+    name: docker
+    enabled: true
+    state: started
+  when: (not ansible_check_mode) or ('docker.service' in ansible_facts.services)
+
+- name: Configure non-root Docker access for target user
+  when:
+    - docker_manage_user_group | bool
+    - docker_user | default('') | length > 0
+  block:
+    - name: Ensure docker group exists
+      ansible.builtin.group:
+        name: docker
+        state: present
+
+    - name: Add target user to docker group
+      ansible.builtin.user:
+        name: "{{ docker_user }}"
+        groups: docker
+        append: true
+      register: _docker_user_group
+
+    - name: Remind user to re-login for new docker group membership
+      ansible.builtin.debug:
+        msg: >-
+          Added '{{ docker_user }}' to the 'docker' group.
+          Log out and log back in (or run 'newgrp docker') to use Docker without sudo.
+      when: _docker_user_group is changed
