@@ -1,0 +1,29 @@
+---
+- name: Ensure OS family is supported by InSync role
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ['Debian', 'RedHat', 'Suse']
+    fail_msg: "Unsupported OS family '{{ ansible_facts['os_family'] }}' for InSync role (supported: Debian, RedHat, Suse)."
+
+- name: Ensure host architecture is supported by InSync
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['architecture'] in ['x86_64', 'amd64']
+    fail_msg: "Insync for Linux requires x86_64/amd64 (detected: '{{ ansible_facts['architecture'] }}')."
+
+- name: Configure Insync repository on Debian family
+  ansible.builtin.include_tasks: debian.yml
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Configure Insync repository on RedHat family
+  ansible.builtin.include_tasks: redhat.yml
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Configure Insync repository on SUSE family
+  ansible.builtin.include_tasks: suse.yml
+  when: ansible_facts['os_family'] == 'Suse'
+
+- name: Install Insync
+  ansible.builtin.package:
+    name: "{{ insync_package }}"
+    state: present

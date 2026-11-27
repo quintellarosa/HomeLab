@@ -1,0 +1,4 @@
+---
+insync_package: insync
+insync_apt_gpg_key_url: https://apt.insync.io/insynchq.gpg
+insync_rpm_gpg_key_url: https://d2t3ff60b2tol4.cloudfront.net/repomd.xml.key

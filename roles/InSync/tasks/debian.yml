@@ -1,0 +1,50 @@
+---
+- name: Determine Insync Debian-family distribution slug
+  ansible.builtin.set_fact:
+    _insync_debian_distro: "{{ 'ubuntu' if ansible_facts['distribution'] == 'Ubuntu' else 'debian' }}"
+
+- name: Ensure /etc/apt/keyrings directory exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download Insync APT signing key
+  ansible.builtin.get_url:
+    url: "{{ insync_apt_gpg_key_url }}"
+    dest: /etc/apt/keyrings/insynchq.asc
+    owner: root
+    group: root
+    mode: "0644"
+    force: true
+  register: _insync_gpg_key
+
+- name: Remove legacy insync.list and duplicate trusted.gpg.d key if present
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/insync.list
+    - /etc/apt/trusted.gpg.d/insynchq.gpg
+
+- name: Add Insync DEB822 repository
+  ansible.builtin.deb822_repository:
+    name: insync
+    types: deb
+    # Use http:// so insync.postinst's `grep -r "http://apt.insync.io"` detects this repo and does not recreate insync.list
+    uris: "http://apt.insync.io/{{ _insync_debian_distro }}"
+    suites: "{{ ansible_facts['distribution_release'] }}"
+    components:
+      - non-free
+      - contrib
+    architectures: amd64
+    signed_by: /etc/apt/keyrings/insynchq.asc
+    state: present
+  register: _insync_deb_repo
+
+- name: Update APT cache after configuring Insync repository
+  ansible.builtin.apt:
+    update_cache: true
+  when: _insync_deb_repo.changed or _insync_gpg_key.changed

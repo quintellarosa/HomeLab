@@ -1,0 +1,36 @@
+---
+- name: Determine Insync SUSE repository URL
+  ansible.builtin.set_fact:
+    _insync_suse_baseurl: >-
+      {{
+        'https://yum.insync.io/opensuse-tumbleweed/rolling/'
+        if ('tumbleweed' in (ansible_facts['distribution'] | lower))
+        else 'https://yum.insync.io/opensuse-leap/' ~ ansible_facts['distribution_version'] ~ '/'
+      }}
+
+- name: Import Insync RPM GPG key
+  ansible.builtin.rpm_key:
+    key: "{{ insync_rpm_gpg_key_url }}"
+    state: present
+
+- name: Configure Insync Zypper repository
+  ansible.builtin.copy:
+    dest: /etc/zypp/repos.d/insync.repo
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [insync]
+      name=Insync repository
+      enabled=1
+      autorefresh=1
+      baseurl={{ _insync_suse_baseurl }}
+      gpgcheck=1
+      gpgkey={{ insync_rpm_gpg_key_url }}
+  register: _insync_zypper_repo
+
+- name: Refresh Insync Zypper repository metadata
+  ansible.builtin.command:
+    cmd: zypper --non-interactive --gpg-auto-import-keys refresh insync
+  when: _insync_zypper_repo.changed
+  changed_when: true
