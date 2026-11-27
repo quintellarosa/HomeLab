@@ -22,31 +22,82 @@
   ansible.builtin.include_tasks: suse.yml
   when: ansible_facts['os_family'] == 'Suse'
 
+- name: Check if libvirt (virsh) is installed
+  ansible.builtin.stat:
+    path: /usr/bin/virsh
+  register: _postgresql_virsh_bin
+
+- name: Query libvirt default network for its virtual bridge NIC
+  ansible.builtin.command:
+    cmd: "virsh net-info {{ postgresql_libvirt_network_name }}"
+  register: _postgresql_libvirt_net_info
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - postgresql_bind_libvirt_nic | bool
+    - _postgresql_virsh_bin.stat.exists
+
+- name: Start libvirt default network if installed but inactive
+  ansible.builtin.command:
+    cmd: "virsh net-start {{ postgresql_libvirt_network_name }}"
+  when:
+    - postgresql_bind_libvirt_nic | bool
+    - postgresql_libvirt_autostart_network | bool
+    - _postgresql_virsh_bin.stat.exists
+    - _postgresql_libvirt_net_info.rc | default(1) == 0
+    - _postgresql_libvirt_net_info.stdout is regex('Active:\s+no')
+  changed_when: true
+
 - name: Refresh network facts after virtualization and package installation
   ansible.builtin.setup:
     gather_subset:
       - "!all"
       - network
 
-- name: Determine target network interface for PostgreSQL
+- name: Extract default libvirt bridge interface name
   ansible.builtin.set_fact:
-    _postgresql_use_preferred_nic: >-
+    _postgresql_libvirt_bridge_candidates: >-
       {{
-        (postgresql_preferred_interface in ansible_facts)
-        and (ansible_facts[postgresql_preferred_interface]['ipv4']['address'] is defined)
+        (
+          _postgresql_libvirt_net_info.stdout
+          | default('')
+          | regex_search('(?m)^Bridge:\s+(\S+)', '\1')
+        )
+        | default([], true)
       }}
 
-- name: Set PostgreSQL bind address and allowed CIDR from {{ postgresql_preferred_interface }}
+- name: Set detected libvirt virtual NIC
   ansible.builtin.set_fact:
-    _postgresql_target_interface: "{{ postgresql_preferred_interface }}"
-    _postgresql_bind_address: "{{ ansible_facts[postgresql_preferred_interface]['ipv4']['address'] }}"
+    _postgresql_detected_libvirt_nic: >-
+      {{
+        (_postgresql_libvirt_bridge_candidates | first)
+        if (_postgresql_libvirt_bridge_candidates | length > 0 and (_postgresql_libvirt_bridge_candidates | first) not in ['', '-'])
+        else ''
+      }}
+
+- name: Determine whether to bind PostgreSQL to libvirt default virtual NIC
+  ansible.builtin.set_fact:
+    _postgresql_use_libvirt_nic: >-
+      {{
+        (postgresql_bind_libvirt_nic | bool)
+        and (_postgresql_virsh_bin.stat.exists | bool)
+        and (_postgresql_detected_libvirt_nic | length > 0)
+        and (_postgresql_detected_libvirt_nic in ansible_facts)
+        and (ansible_facts[_postgresql_detected_libvirt_nic]['ipv4']['address'] is defined)
+      }}
+
+- name: Set PostgreSQL bind address and allowed CIDR from libvirt default virtual NIC
+  ansible.builtin.set_fact:
+    _postgresql_target_interface: "{{ _postgresql_detected_libvirt_nic }}"
+    _postgresql_bind_address: "{{ ansible_facts[_postgresql_detected_libvirt_nic]['ipv4']['address'] }}"
     _postgresql_allowed_cidr: >-
       {{
-        ansible_facts[postgresql_preferred_interface]['ipv4']['network']
+        ansible_facts[_postgresql_detected_libvirt_nic]['ipv4']['network']
         ~ '/'
-        ~ ansible_facts[postgresql_preferred_interface]['ipv4']['prefix']
+        ~ ansible_facts[_postgresql_detected_libvirt_nic]['ipv4']['prefix']
       }}
-  when: _postgresql_use_preferred_nic | bool
+  when: _postgresql_use_libvirt_nic | bool
 
 - name: Fall back to machine default IPv4 network interface for PostgreSQL
   ansible.builtin.set_fact:
@@ -58,7 +109,7 @@
         if (ansible_facts['default_ipv4']['network'] is defined and ansible_facts['default_ipv4']['prefix'] is defined)
         else '127.0.0.1/32'
       }}
-  when: not (_postgresql_use_preferred_nic | bool)
+  when: not (_postgresql_use_libvirt_nic | bool)
 
 - name: Compute PostgreSQL listen_addresses value
   ansible.builtin.set_fact:
@@ -107,8 +158,15 @@
           host    all             all             {{ _postgresql_allowed_cidr }}        {{ postgresql_hba_auth_method }}
       notify: Restart postgresql
 
-- name: Ensure PostgreSQL starts after libvirtd when bound to {{ postgresql_preferred_interface }}
-  when: _postgresql_use_preferred_nic | bool
+- name: Remove legacy wait-virbr0.conf systemd drop-ins if present
+  ansible.builtin.file:
+    path: "{{ item }}/wait-virbr0.conf"
+    state: absent
+  loop: "{{ _postgresql_systemd_unit_dropin_dirs }}"
+  notify: Reload systemd daemon
+
+- name: Ensure PostgreSQL starts after libvirt when bound to libvirt virtual NIC
+  when: _postgresql_use_libvirt_nic | bool
   block:
     - name: Create systemd drop-in directories for PostgreSQL
       ansible.builtin.file:
@@ -119,25 +177,28 @@
         mode: "0755"
       loop: "{{ _postgresql_systemd_unit_dropin_dirs }}"
 
-    - name: Install systemd drop-in ordering PostgreSQL after libvirtd
+    - name: Install systemd drop-in ordering PostgreSQL after libvirt and waiting for bridge IP
       ansible.builtin.copy:
-        dest: "{{ item }}/wait-virbr0.conf"
+        dest: "{{ item }}/wait-libvirt-nic.conf"
         owner: root
         group: root
         mode: "0644"
         content: |
           [Unit]
-          After=network-online.target libvirtd.service
+          After=network-online.target libvirtd.service virtnetworkd.service
           Wants=network-online.target
+
+          [Service]
+          ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do ip -4 addr show dev {{ _postgresql_target_interface }} 2>/dev/null | grep -q "{{ _postgresql_bind_address }}/" && exit 0; sleep 1; done; exit 0'
       loop: "{{ _postgresql_systemd_unit_dropin_dirs }}"
       notify: Reload systemd daemon
 
-- name: Remove virbr0 systemd drop-ins if falling back to default interface
+- name: Remove libvirt NIC systemd drop-ins if falling back to default interface
   ansible.builtin.file:
-    path: "{{ item }}/wait-virbr0.conf"
+    path: "{{ item }}/wait-libvirt-nic.conf"
     state: absent
   loop: "{{ _postgresql_systemd_unit_dropin_dirs }}"
-  when: not (_postgresql_use_preferred_nic | bool)
+  when: not (_postgresql_use_libvirt_nic | bool)
   notify: Reload systemd daemon
 
 - name: Check if UFW is installed (Debian)

@@ -1,5 +1,7 @@
 ---
-postgresql_preferred_interface: virbr0
+postgresql_bind_libvirt_nic: true
+postgresql_libvirt_network_name: "default"
+postgresql_libvirt_autostart_network: true
 postgresql_port: 5432
 postgresql_hba_auth_method: scram-sha-256
 postgresql_service_name: postgresql
