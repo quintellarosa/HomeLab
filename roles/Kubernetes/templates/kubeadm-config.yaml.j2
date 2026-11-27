@@ -1,0 +1,35 @@
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+{% if _kubernetes_use_libvirt_nic | bool %}
+localAPIEndpoint:
+  advertiseAddress: "{{ _kubernetes_bind_address }}"
+  bindPort: {{ kubernetes_api_port }}
+{% endif %}
+nodeRegistration:
+  criSocket: "{{ kubernetes_cri_socket }}"
+{% if kubernetes_allow_control_plane_scheduling | bool %}
+  taints: []
+{% endif %}
+{% if _kubernetes_use_libvirt_nic | bool %}
+  kubeletExtraArgs:
+    - name: "node-ip"
+      value: "{{ _kubernetes_bind_address }}"
+{% endif %}
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+{% if _kubernetes_use_libvirt_nic | bool %}
+apiServer:
+  certSANs:
+    - "{{ _kubernetes_bind_address }}"
+    - "127.0.0.1"
+    - "localhost"
+{% endif %}
+networking:
+  podSubnet: "{{ kubernetes_pod_network_cidr }}"
+  serviceSubnet: "{{ kubernetes_service_cidr }}"
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd

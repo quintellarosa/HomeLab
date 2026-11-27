@@ -1,0 +1,43 @@
+---
+kubernetes_user: "{{ target_user | default(lookup('ansible.builtin.env', 'SUDO_USER') or lookup('ansible.builtin.env', 'USER'), true) }}"
+kubernetes_configure_user_kubeconfig: true
+
+# Kubernetes minor release branch on pkgs.k8s.io (e.g., v1.37)
+kubernetes_minor_version: "v1.37"
+kubernetes_packages:
+  - kubelet
+  - kubeadm
+  - kubectl
+
+# Container runtime
+kubernetes_cri_socket: "unix:///run/containerd/containerd.sock"
+kubernetes_containerd_package_by_family:
+  Debian: containerd
+  RedHat: containerd
+  Suse: containerd
+
+# Cluster networking defaults (10.244.0.0/16 avoids collisions with 192.168.x.x LAN & virbr0)
+kubernetes_api_port: 6443
+kubernetes_pod_network_cidr: "10.244.0.0/16"
+kubernetes_service_cidr: "10.96.0.0/12"
+
+# Control-plane behavior
+kubernetes_allow_control_plane_scheduling: true
+kubernetes_disable_swap: true
+kubernetes_configure_selinux: true
+kubernetes_configure_firewall: true
+
+# Libvirt virtual NIC detection & binding
+kubernetes_bind_libvirt_nic: true
+kubernetes_libvirt_network_name: "default"
+kubernetes_libvirt_fallback_interface: "virbr0"
+kubernetes_libvirt_autostart_network: true
+
+# Control-plane firewall ports (TCP)
+kubernetes_firewall_tcp_ports:
+  - "6443"
+  - "2379:2380"
+  - "10250"
+  - "10257"
+  - "10259"
+  - "30000:32767"

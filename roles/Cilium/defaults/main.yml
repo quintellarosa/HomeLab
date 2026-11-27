@@ -1,0 +1,49 @@
+---
+# Cilium CLI & Cilium CNI versions
+cilium_cli_version: "v0.20.3"
+cilium_version: "1.20.5"
+cilium_install_dir: "/usr/local/bin"
+
+# Kubernetes admin kubeconfig path (created by kubeadm)
+cilium_kubeconfig: "/etc/kubernetes/admin.conf"
+cilium_namespace: "kube-system"
+cilium_values_file: "/etc/kubernetes/cilium-values.yaml"
+cilium_wait_duration: "5m"
+
+# Cilium CNI settings
+# 'kubernetes' IPAM honors the podSubnet configured by kubeadm (e.g. 10.244.0.0/16).
+cilium_ipam_mode: "kubernetes"
+cilium_cluster_pool_ipv4_cidr: "10.244.0.0/16"
+cilium_cluster_pool_ipv4_mask_size: 24
+
+cilium_routing_mode: "tunnel"
+cilium_tunnel_protocol: "vxlan"
+
+# Keep false alongside standard kubeadm kube-proxy; set true if kubeadm skipped kube-proxy.
+cilium_kube_proxy_replacement: false
+
+# 1 replica for single-node homelab clusters; increase to 2+ for HA multi-node clusters.
+cilium_operator_replicas: 1
+
+# Observability (Hubble)
+cilium_hubble_enabled: true
+cilium_hubble_relay_enabled: true
+cilium_hubble_ui_enabled: false
+
+# Libvirt NIC awareness (mirrors Kubernetes role for firewall scoping)
+cilium_bind_libvirt_nic: true
+cilium_libvirt_network_name: "default"
+cilium_libvirt_fallback_interface: "virbr0"
+
+# Firewall rules (UFW on Debian, firewalld on RedHat/SUSE)
+cilium_configure_firewall: true
+cilium_firewall_ports:
+  - port: "4240"
+    proto: "tcp"
+    comment: "HomeLab Cilium health"
+  - port: "4244"
+    proto: "tcp"
+    comment: "HomeLab Cilium Hubble"
+  - port: "8472"
+    proto: "udp"
+    comment: "HomeLab Cilium VXLAN"

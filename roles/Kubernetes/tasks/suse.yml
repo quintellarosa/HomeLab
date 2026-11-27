@@ -1,0 +1,61 @@
+---
+- name: Install Kubernetes prerequisite packages on SUSE family
+  ansible.builtin.package:
+    name:
+      - conntrack-tools
+      - socat
+      - ethtool
+      - ebtables
+      - iptables
+      - iproute2
+      - curl
+      - ca-certificates
+    state: present
+
+- name: Import Kubernetes official RPM GPG key on SUSE family
+  ansible.builtin.rpm_key:
+    key: "https://pkgs.k8s.io/core:/stable:/{{ kubernetes_minor_version }}/rpm/repodata/repomd.xml.key"
+    state: present
+
+- name: Configure Kubernetes official Zypper repository
+  ansible.builtin.copy:
+    dest: /etc/zypp/repos.d/kubernetes.repo
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [kubernetes]
+      name=Kubernetes {{ kubernetes_minor_version }}
+      enabled=1
+      autorefresh=1
+      baseurl=https://pkgs.k8s.io/core:/stable:/{{ kubernetes_minor_version }}/rpm/
+      gpgcheck=1
+      gpgkey=https://pkgs.k8s.io/core:/stable:/{{ kubernetes_minor_version }}/rpm/repodata/repomd.xml.key
+  register: _kubernetes_zypper_repo
+
+- name: Refresh Kubernetes Zypper repository metadata
+  ansible.builtin.command:
+    cmd: zypper --non-interactive --gpg-auto-import-keys refresh kubernetes
+  when: _kubernetes_zypper_repo.changed
+  changed_when: true
+
+- name: Install kubelet, kubeadm, and kubectl on SUSE family
+  ansible.builtin.package:
+    name: "{{ kubernetes_packages }}"
+    state: present
+
+- name: Check existing Zypper package locks
+  ansible.builtin.command:
+    cmd: zypper locks
+  register: _kubernetes_zypper_locks
+  changed_when: false
+  check_mode: false
+
+- name: Lock Kubernetes packages in Zypper to prevent unintended upgrades
+  ansible.builtin.command:
+    cmd: "zypper --non-interactive addlock {{ item }}"
+  loop: "{{ kubernetes_packages }}"
+  when:
+    - not ansible_check_mode
+    - _kubernetes_zypper_locks.stdout is not regex('\\|\\s+' ~ item ~ '\\s+\\|')
+  changed_when: true

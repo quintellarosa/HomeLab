@@ -23,3 +23,5 @@
     - Virtualization
     - PostgreSQL
     - Docker
+    - Kubernetes
+    - Cilium
