@@ -1,0 +1,5 @@
+---
+- name: Restart libvirt
+  ansible.builtin.systemd_service:
+    name: "{{ 'virtqemud.service' if (_virtualization_use_modular_daemons | default(false) | bool) else 'libvirtd.service' }}"
+    state: restarted

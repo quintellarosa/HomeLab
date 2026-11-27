@@ -1,0 +1,5 @@
+---
+thunderbird_package: thunderbird
+thunderbird_mozilla_gpg_key_url: https://packages.mozilla.org/apt/repo-signing-key.gpg
+thunderbird_mozilla_apt_uri: https://packages.mozilla.org/apt
+thunderbird_mozilla_apt_suite: thunderbird-deb

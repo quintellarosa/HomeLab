@@ -1,0 +1,19 @@
+---
+postgresql_preferred_interface: virbr0
+postgresql_port: 5432
+postgresql_hba_auth_method: scram-sha-256
+postgresql_service_name: postgresql
+postgresql_configure_firewalld: true
+
+postgresql_packages_by_family:
+  Debian:
+    - postgresql
+    - postgresql-client
+  RedHat:
+    - postgresql-server
+    - postgresql
+  Suse:
+    - postgresql-server
+    - postgresql
+
+postgresql_packages: "{{ postgresql_packages_by_family[ansible_facts['os_family']] | default([]) }}"

@@ -1,0 +1,17 @@
+---
+- name: Check if PostgreSQL data directory is initialized (SUSE)
+  ansible.builtin.stat:
+    path: /var/lib/pgsql/data/PG_VERSION
+  register: _postgresql_suse_pg_version
+
+- name: Start PostgreSQL once to trigger openSUSE cluster initialization
+  ansible.builtin.service:
+    name: "{{ postgresql_service_name }}"
+    state: started
+  when: not _postgresql_suse_pg_version.stat.exists
+
+- name: Set PostgreSQL configuration directory (SUSE)
+  ansible.builtin.set_fact:
+    _postgresql_conf_dir: /var/lib/pgsql/data
+    _postgresql_systemd_unit_dropin_dirs:
+      - /etc/systemd/system/postgresql.service.d

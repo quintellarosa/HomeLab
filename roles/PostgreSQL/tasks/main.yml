@@ -1,0 +1,203 @@
+---
+- name: Ensure OS family is supported by PostgreSQL role
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ['Debian', 'RedHat', 'Suse']
+    fail_msg: "Unsupported OS family '{{ ansible_facts['os_family'] }}' for PostgreSQL role (supported: Debian, RedHat, Suse)."
+
+- name: Install PostgreSQL packages
+  ansible.builtin.package:
+    name: "{{ postgresql_packages }}"
+    state: present
+
+- name: Prepare PostgreSQL cluster on Debian family
+  ansible.builtin.include_tasks: debian.yml
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Prepare PostgreSQL cluster on RedHat family
+  ansible.builtin.include_tasks: redhat.yml
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Prepare PostgreSQL cluster on SUSE family
+  ansible.builtin.include_tasks: suse.yml
+  when: ansible_facts['os_family'] == 'Suse'
+
+- name: Refresh network facts after virtualization and package installation
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - network
+
+- name: Determine target network interface for PostgreSQL
+  ansible.builtin.set_fact:
+    _postgresql_use_preferred_nic: >-
+      {{
+        (postgresql_preferred_interface in ansible_facts)
+        and (ansible_facts[postgresql_preferred_interface]['ipv4']['address'] is defined)
+      }}
+
+- name: Set PostgreSQL bind address and allowed CIDR from {{ postgresql_preferred_interface }}
+  ansible.builtin.set_fact:
+    _postgresql_target_interface: "{{ postgresql_preferred_interface }}"
+    _postgresql_bind_address: "{{ ansible_facts[postgresql_preferred_interface]['ipv4']['address'] }}"
+    _postgresql_allowed_cidr: >-
+      {{
+        ansible_facts[postgresql_preferred_interface]['ipv4']['network']
+        ~ '/'
+        ~ ansible_facts[postgresql_preferred_interface]['ipv4']['prefix']
+      }}
+  when: _postgresql_use_preferred_nic | bool
+
+- name: Fall back to machine default IPv4 network interface for PostgreSQL
+  ansible.builtin.set_fact:
+    _postgresql_target_interface: "{{ ansible_facts['default_ipv4']['interface'] | default('lo') }}"
+    _postgresql_bind_address: "{{ ansible_facts['default_ipv4']['address'] | default('127.0.0.1') }}"
+    _postgresql_allowed_cidr: >-
+      {{
+        (ansible_facts['default_ipv4']['network'] ~ '/' ~ ansible_facts['default_ipv4']['prefix'])
+        if (ansible_facts['default_ipv4']['network'] is defined and ansible_facts['default_ipv4']['prefix'] is defined)
+        else '127.0.0.1/32'
+      }}
+  when: not (_postgresql_use_preferred_nic | bool)
+
+- name: Compute PostgreSQL listen_addresses value
+  ansible.builtin.set_fact:
+    _postgresql_listen_addresses: >-
+      {{
+        'localhost'
+        if _postgresql_bind_address in ['127.0.0.1', 'localhost']
+        else 'localhost,' ~ _postgresql_bind_address
+      }}
+
+- name: Report selected PostgreSQL network configuration
+  ansible.builtin.debug:
+    msg: >-
+      PostgreSQL will listen on '{{ _postgresql_listen_addresses }}' (interface: {{ _postgresql_target_interface }})
+      and accept {{ postgresql_hba_auth_method }} connections from {{ _postgresql_allowed_cidr }}.
+
+- name: Verify PostgreSQL configuration directory was detected
+  ansible.builtin.assert:
+    that:
+      - _postgresql_conf_dir | default('') | length > 0
+    fail_msg: "Could not locate PostgreSQL configuration directory (expected postgresql.conf)."
+  when: not ansible_check_mode
+
+- name: Configure PostgreSQL listen_addresses, port, and pg_hba.conf
+  when: _postgresql_conf_dir | default('') | length > 0
+  block:
+    - name: Configure listen_addresses in postgresql.conf
+      ansible.builtin.lineinfile:
+        path: "{{ _postgresql_conf_dir }}/postgresql.conf"
+        regexp: "^#?\\s*listen_addresses\\s*="
+        line: "listen_addresses = '{{ _postgresql_listen_addresses }}'"
+      notify: Restart postgresql
+
+    - name: Configure port in postgresql.conf
+      ansible.builtin.lineinfile:
+        path: "{{ _postgresql_conf_dir }}/postgresql.conf"
+        regexp: "^#?\\s*port\\s*="
+        line: "port = {{ postgresql_port }}"
+      notify: Restart postgresql
+
+    - name: Allow connections from {{ _postgresql_allowed_cidr }} in pg_hba.conf
+      ansible.builtin.blockinfile:
+        path: "{{ _postgresql_conf_dir }}/pg_hba.conf"
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - HomeLab PostgreSQL network access"
+        block: |
+          host    all             all             {{ _postgresql_allowed_cidr }}        {{ postgresql_hba_auth_method }}
+      notify: Restart postgresql
+
+- name: Ensure PostgreSQL starts after libvirtd when bound to {{ postgresql_preferred_interface }}
+  when: _postgresql_use_preferred_nic | bool
+  block:
+    - name: Create systemd drop-in directories for PostgreSQL
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop: "{{ _postgresql_systemd_unit_dropin_dirs }}"
+
+    - name: Install systemd drop-in ordering PostgreSQL after libvirtd
+      ansible.builtin.copy:
+        dest: "{{ item }}/wait-virbr0.conf"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          After=network-online.target libvirtd.service
+          Wants=network-online.target
+      loop: "{{ _postgresql_systemd_unit_dropin_dirs }}"
+      notify: Reload systemd daemon
+
+- name: Remove virbr0 systemd drop-ins if falling back to default interface
+  ansible.builtin.file:
+    path: "{{ item }}/wait-virbr0.conf"
+    state: absent
+  loop: "{{ _postgresql_systemd_unit_dropin_dirs }}"
+  when: not (_postgresql_use_preferred_nic | bool)
+  notify: Reload systemd daemon
+
+- name: Gather service facts to detect firewalld
+  ansible.builtin.service_facts:
+
+- name: Open PostgreSQL port in firewalld for {{ _postgresql_target_interface }}
+  when:
+    - postgresql_configure_firewalld | bool
+    - "'firewalld.service' in ansible_facts.services"
+    - ansible_facts.services['firewalld.service'].state == 'running'
+  block:
+    - name: Detect firewalld zone for {{ _postgresql_target_interface }}
+      ansible.builtin.command:
+        cmd: "firewall-cmd --get-zone-of-interface={{ _postgresql_target_interface }}"
+      register: _postgresql_firewalld_iface_zone
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Detect default firewalld zone if interface is unassigned
+      ansible.builtin.command:
+        cmd: firewall-cmd --get-default-zone
+      register: _postgresql_firewalld_default_zone
+      changed_when: false
+      check_mode: false
+      when: _postgresql_firewalld_iface_zone.rc != 0
+
+    - name: Set target firewalld zone
+      ansible.builtin.set_fact:
+        _postgresql_firewalld_zone: >-
+          {{
+            (_postgresql_firewalld_iface_zone.stdout | trim)
+            if _postgresql_firewalld_iface_zone.rc == 0
+            else (_postgresql_firewalld_default_zone.stdout | trim)
+          }}
+
+    - name: Check if postgresql service is allowed in firewalld zone
+      ansible.builtin.command:
+        cmd: "firewall-cmd --permanent --zone={{ _postgresql_firewalld_zone }} --query-service=postgresql"
+      register: _postgresql_firewalld_query
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Allow postgresql service in firewalld zone
+      ansible.builtin.command:
+        cmd: "firewall-cmd --permanent --zone={{ _postgresql_firewalld_zone }} --add-service=postgresql"
+      when: _postgresql_firewalld_query.rc != 0
+      changed_when: true
+      register: _postgresql_firewalld_added
+
+    - name: Reload firewalld to apply PostgreSQL rule
+      ansible.builtin.command:
+        cmd: firewall-cmd --reload
+      when: _postgresql_firewalld_added is changed
+      changed_when: true
+
+- name: Ensure PostgreSQL service is enabled and running
+  ansible.builtin.service:
+    name: "{{ postgresql_service_name }}"
+    enabled: true
+    state: started
+  when: (not ansible_check_mode) or ((postgresql_service_name ~ '.service') in ansible_facts.services)

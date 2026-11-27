@@ -1,0 +1,156 @@
+---
+- name: Ensure OS family is supported by Virtualization role
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ['Debian', 'RedHat', 'Suse']
+    fail_msg: "Unsupported OS family '{{ ansible_facts['os_family'] }}' for Virtualization role (supported: Debian, RedHat, Suse)."
+
+- name: Install KVM, QEMU, libvirt, and virt-manager packages
+  ansible.builtin.package:
+    name: "{{ virtualization_packages }}"
+    state: present
+
+- name: Check libvirt daemon configuration files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: _virtualization_libvirt_confs
+  loop:
+    - /etc/libvirt/libvirtd.conf
+    - /etc/libvirt/virtqemud.conf
+
+- name: Configure unix_sock_group for libvirt daemons
+  ansible.builtin.lineinfile:
+    path: "{{ item.item }}"
+    regexp: '^#?\s*unix_sock_group\s*='
+    line: 'unix_sock_group = "libvirt"'
+  loop: "{{ _virtualization_libvirt_confs.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.stat.exists
+  notify: Restart libvirt
+
+- name: Configure unix_sock_rw_perms for libvirt daemons
+  ansible.builtin.lineinfile:
+    path: "{{ item.item }}"
+    regexp: '^#?\s*unix_sock_rw_perms\s*='
+    line: 'unix_sock_rw_perms = "0770"'
+  loop: "{{ _virtualization_libvirt_confs.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.stat.exists
+  notify: Restart libvirt
+
+- name: Check if Polkit rules directory exists
+  ansible.builtin.stat:
+    path: /etc/polkit-1/rules.d
+  register: _virtualization_polkit_dir
+
+- name: Allow libvirt group members passwordless access via Polkit
+  ansible.builtin.copy:
+    dest: /etc/polkit-1/rules.d/50-libvirt.rules
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      polkit.addRule(function(action, subject) {
+          if (action.id == "org.libvirt.unix.manage" &&
+              subject.isInGroup("libvirt")) {
+              return polkit.Result.YES;
+          }
+      });
+  when: _virtualization_polkit_dir.stat.exists
+
+- name: Gather systemd service facts for libvirt
+  ansible.builtin.service_facts:
+
+- name: Determine whether modular libvirt sockets are active
+  ansible.builtin.set_fact:
+    _virtualization_use_modular_daemons: >-
+      {{
+        ('virtqemud.socket' in ansible_facts.services and ansible_facts.services['virtqemud.socket'].status | default('') == 'enabled')
+        or ('libvirtd.service' not in ansible_facts.services)
+      }}
+
+- name: Enable and start monolithic libvirtd service
+  ansible.builtin.systemd_service:
+    name: libvirtd.service
+    enabled: true
+    state: started
+  when:
+    - not (_virtualization_use_modular_daemons | bool)
+    - "'libvirtd.service' in ansible_facts.services"
+
+- name: Enable and start modular libvirt sockets
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - virtqemud.socket
+    - virtnetworkd.socket
+    - virtstoraged.socket
+  when:
+    - _virtualization_use_modular_daemons | bool
+    - item in ansible_facts.services
+
+- name: Read existing system groups
+  ansible.builtin.getent:
+    database: group
+
+- name: Add target user to virtualization groups
+  ansible.builtin.user:
+    name: "{{ virtualization_user }}"
+    groups: "{{ virtualization_user_groups | select('in', ansible_facts.getent_group) | list }}"
+    append: true
+  register: _virtualization_user_groups
+  when:
+    - virtualization_user | default('') | length > 0
+    - (virtualization_user_groups | select('in', ansible_facts.getent_group) | list) | length > 0
+
+- name: Remind user to re-login for new libvirt/kvm group membership
+  ansible.builtin.debug:
+    msg: >-
+      Added '{{ virtualization_user }}' to virtualization groups ({{ virtualization_user_groups | join(', ') }}).
+      Log out and log back in (or reboot) for Virtual Machine Manager to connect without sudo.
+  when: _virtualization_user_groups is changed
+
+- name: Configure default libvirt NAT network
+  when: virtualization_enable_default_network | bool
+  block:
+    - name: Inspect default libvirt network
+      ansible.builtin.command:
+        cmd: virsh net-info default
+      register: _virtualization_default_net
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Start default libvirt network
+      ansible.builtin.command:
+        cmd: virsh net-start default
+      when:
+        - _virtualization_default_net.rc == 0
+        - "'Active:' in _virtualization_default_net.stdout"
+        - _virtualization_default_net.stdout is regex('Active:\s+no')
+      changed_when: true
+
+    - name: Enable autostart on default libvirt network
+      ansible.builtin.command:
+        cmd: virsh net-autostart default
+      when:
+        - _virtualization_default_net.rc == 0
+        - "'Autostart:' in _virtualization_default_net.stdout"
+        - _virtualization_default_net.stdout is regex('Autostart:\s+no')
+      changed_when: true
+
+- name: Check if /dev/kvm is present
+  ansible.builtin.stat:
+    path: /dev/kvm
+  register: _virtualization_kvm_dev
+
+- name: Warn if hardware KVM acceleration is unavailable
+  ansible.builtin.debug:
+    msg: >-
+      /dev/kvm was not detected. Virtualization packages are installed, but hardware acceleration
+      requires enabling Intel VT-x / AMD-V in BIOS/UEFI (or nested virtualization if inside a VM).
+  when: not _virtualization_kvm_dev.stat.exists

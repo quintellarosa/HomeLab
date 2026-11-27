@@ -1,0 +1,47 @@
+---
+- name: Ensure /etc/apt/keyrings directory exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download Mozilla APT repository signing key
+  ansible.builtin.get_url:
+    url: "{{ thunderbird_mozilla_gpg_key_url }}"
+    dest: /etc/apt/keyrings/packages.mozilla.org.asc
+    owner: root
+    group: root
+    mode: "0644"
+    force: true
+  register: _thunderbird_gpg_key
+
+- name: Add Mozilla Thunderbird DEB822 repository
+  ansible.builtin.deb822_repository:
+    name: mozilla-thunderbird
+    types: deb
+    uris: "{{ thunderbird_mozilla_apt_uri }}"
+    suites: "{{ thunderbird_mozilla_apt_suite }}"
+    components: main
+    architectures: amd64
+    signed_by: /etc/apt/keyrings/packages.mozilla.org.asc
+    state: present
+  register: _thunderbird_deb_repo
+
+- name: Pin Mozilla Thunderbird packages above Ubuntu Snap transitional stub
+  ansible.builtin.copy:
+    dest: /etc/apt/preferences.d/mozilla-thunderbird
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      Package: thunderbird*
+      Pin: origin packages.mozilla.org
+      Pin-Priority: 1001
+  register: _thunderbird_apt_pin
+
+- name: Update APT cache after configuring Mozilla Thunderbird repository
+  ansible.builtin.apt:
+    update_cache: true
+  when: _thunderbird_deb_repo.changed or _thunderbird_apt_pin.changed or _thunderbird_gpg_key.changed

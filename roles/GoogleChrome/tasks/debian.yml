@@ -14,6 +14,8 @@
     owner: root
     group: root
     mode: "0644"
+    force: true
+  register: _google_chrome_gpg_key
 
 - name: Remove legacy .list repository file if present
   ansible.builtin.file:
@@ -35,4 +37,4 @@
 - name: Update APT cache after configuring Google Chrome repository
   ansible.builtin.apt:
     update_cache: true
-  when: _google_chrome_deb_repo.changed
+  when: _google_chrome_deb_repo.changed or _google_chrome_gpg_key.changed

@@ -1,5 +1,5 @@
 ---
-# Post-install notebook reconfiguration (Debian & RedHat families)
+# Post-install notebook reconfiguration (Debian, RedHat & SUSE families)
 - name: Configure HomeLab personal notebook
   hosts: localhost
   become: true
@@ -9,12 +9,15 @@
     - name: Verify OS family is supported
       ansible.builtin.assert:
         that:
-          - ansible_facts['os_family'] in ['Debian', 'RedHat']
-        fail_msg: "Unsupported OS family '{{ ansible_facts['os_family'] }}'. Supported families: Debian, RedHat."
+          - ansible_facts['os_family'] in ['Debian', 'RedHat', 'Suse']
+        fail_msg: "Unsupported OS family '{{ ansible_facts['os_family'] }}'. Supported families: Debian, RedHat, Suse."
 
   roles:
     - EssentialTools
     - UserAvatar
-    - Bluetooth
+    #- Bluetooth
     - GoogleChrome
     - GoogleAntigravityIDE
+    - Thunderbird
+    - Virtualization
+    - PostgreSQL

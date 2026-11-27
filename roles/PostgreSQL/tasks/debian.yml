@@ -1,0 +1,19 @@
+---
+- name: Locate PostgreSQL main cluster configuration on Debian family
+  ansible.builtin.find:
+    paths: /etc/postgresql
+    patterns: postgresql.conf
+    recurse: true
+  register: _postgresql_debian_confs
+
+- name: Set PostgreSQL configuration directory (Debian)
+  ansible.builtin.set_fact:
+    _postgresql_conf_dir: >-
+      {{
+        (_postgresql_debian_confs.files | map(attribute='path') | sort | last | dirname)
+        if (_postgresql_debian_confs.files | length > 0)
+        else ''
+      }}
+    _postgresql_systemd_unit_dropin_dirs:
+      - /etc/systemd/system/postgresql.service.d
+      - /etc/systemd/system/postgresql@.service.d

@@ -1,0 +1,68 @@
+---
+virtualization_user: "{{ target_user | default(lookup('ansible.builtin.env', 'SUDO_USER') or lookup('ansible.builtin.env', 'USER'), true) }}"
+virtualization_enable_default_network: true
+virtualization_user_groups:
+  - libvirt
+  - kvm
+
+virtualization_packages_by_family:
+  Debian:
+    common:
+      - qemu-utils
+      - libvirt-daemon-system
+      - libvirt-clients
+      - virtinst
+      - virt-manager
+      - swtpm
+      - swtpm-tools
+      - bridge-utils
+    x86_64:
+      - qemu-system-x86
+      - ovmf
+    aarch64:
+      - qemu-system-arm
+      - qemu-efi-aarch64
+
+  RedHat:
+    common:
+      - qemu-kvm
+      - qemu-img
+      - libvirt
+      - libvirt-client
+      - virt-install
+      - virt-manager
+      - swtpm
+      - swtpm-tools
+    x86_64:
+      - edk2-ovmf
+    aarch64:
+      - edk2-aarch64
+
+  Suse:
+    common:
+      - qemu-tools
+      - libvirt
+      - libvirt-daemon-qemu
+      - libvirt-client
+      - virt-install
+      - virt-manager
+      - swtpm
+    x86_64:
+      - qemu-kvm
+      - qemu-ovmf-x86_64
+    aarch64:
+      - qemu-arm
+      - qemu-uefi-aarch64
+
+virtualization_arch_key: >-
+  {{
+    'aarch64'
+    if ansible_facts['architecture'] in ['aarch64', 'arm64']
+    else 'x86_64'
+  }}
+
+virtualization_packages: >-
+  {{
+    (virtualization_packages_by_family[ansible_facts['os_family']]['common'] | default([]))
+    + (virtualization_packages_by_family[ansible_facts['os_family']][virtualization_arch_key] | default([]))
+  }}
