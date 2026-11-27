@@ -30,10 +30,9 @@ cilium_hubble_enabled: true
 cilium_hubble_relay_enabled: true
 cilium_hubble_ui_enabled: false
 
-# Libvirt NIC awareness (mirrors Kubernetes role for firewall scoping)
+# Libvirt NIC awareness (bridge is discovered dynamically via virsh for firewall scoping)
 cilium_bind_libvirt_nic: true
 cilium_libvirt_network_name: "default"
-cilium_libvirt_fallback_interface: "virbr0"
 
 # Firewall rules (UFW on Debian, firewalld on RedHat/SUSE)
 cilium_configure_firewall: true

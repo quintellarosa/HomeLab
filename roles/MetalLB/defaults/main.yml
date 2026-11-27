@@ -1,0 +1,37 @@
+---
+# MetalLB release & manifests
+metallb_version: "v0.16.2"
+metallb_namespace: "metallb-system"
+metallb_manifest_url: "https://raw.githubusercontent.com/metallb/metallb/{{ metallb_version }}/config/manifests/metallb-native.yaml"
+metallb_manifest_file: "/etc/kubernetes/metallb-native.yaml"
+metallb_config_file: "/etc/kubernetes/metallb-config.yaml"
+
+# Kubernetes control-plane detection paths (kubeadm master)
+metallb_kubeconfig: "/etc/kubernetes/admin.conf"
+metallb_apiserver_manifest: "/etc/kubernetes/manifests/kube-apiserver.yaml"
+
+# L2 IPAddressPool & L2Advertisement settings
+metallb_pool_name: "homelab-pool"
+metallb_l2_name: "homelab-l2"
+# Leave empty to auto-derive <subnet-prefix>.<start>-<subnet-prefix>.<end> from the target NIC subnet,
+# or set an explicit range/CIDR such as "192.168.122.240-192.168.122.250".
+metallb_address_pool: ""
+metallb_pool_start_octet: 240
+metallb_pool_end_octet: 250
+
+# Enable kube-proxy strictARP (required by MetalLB L2 mode when kube-proxy is in IPVS mode)
+metallb_configure_strict_arp: true
+
+# Libvirt default virtual NIC awareness (bridge is discovered dynamically via virsh)
+metallb_bind_libvirt_nic: true
+metallb_libvirt_network_name: "default"
+
+# Firewall rules for MetalLB speaker memberlist gossip (UFW on Debian, firewalld on RedHat/SUSE)
+metallb_configure_firewall: true
+metallb_firewall_ports:
+  - port: "7946"
+    proto: "tcp"
+    comment: "HomeLab MetalLB speaker"
+  - port: "7946"
+    proto: "udp"
+    comment: "HomeLab MetalLB speaker"

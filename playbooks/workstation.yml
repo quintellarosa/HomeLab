@@ -26,3 +26,4 @@
     - Docker
     - Kubernetes
     - Cilium
+    - MetalLB

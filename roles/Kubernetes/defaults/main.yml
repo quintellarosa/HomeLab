@@ -16,7 +16,7 @@ kubernetes_containerd_package_by_family:
   RedHat: containerd
   Suse: containerd
 
-# Cluster networking defaults (10.244.0.0/16 avoids collisions with 192.168.x.x LAN & virbr0)
+# Cluster networking defaults (10.244.0.0/16 avoids collisions with 192.168.x.x LAN & libvirt)
 kubernetes_api_port: 6443
 kubernetes_pod_network_cidr: "10.244.0.0/16"
 kubernetes_service_cidr: "10.96.0.0/12"
@@ -27,10 +27,9 @@ kubernetes_disable_swap: true
 kubernetes_configure_selinux: true
 kubernetes_configure_firewall: true
 
-# Libvirt virtual NIC detection & binding
+# Libvirt virtual NIC detection & binding (bridge is discovered dynamically via virsh)
 kubernetes_bind_libvirt_nic: true
 kubernetes_libvirt_network_name: "default"
-kubernetes_libvirt_fallback_interface: "virbr0"
 kubernetes_libvirt_autostart_network: true
 
 # Control-plane firewall ports (TCP)

@@ -229,11 +229,7 @@
       {{
         (_kubernetes_libvirt_bridge_candidates | first)
         if (_kubernetes_libvirt_bridge_candidates | length > 0 and (_kubernetes_libvirt_bridge_candidates | first) not in ['', '-'])
-        else (
-          kubernetes_libvirt_fallback_interface
-          if (_kubernetes_virsh_bin.stat.exists and (kubernetes_libvirt_fallback_interface in ansible_facts))
-          else ''
-        )
+        else ''
       }}
 
 - name: Decide whether to bind Kubernetes to libvirt virtual NIC
@@ -543,5 +539,5 @@
       Kubernetes ({{ kubernetes_minor_version }}) control plane is configured
       {{ 'and bound to ' ~ _kubernetes_target_interface ~ ' (' ~ _kubernetes_bind_address ~ ')' if (_kubernetes_use_libvirt_nic | bool) else '(vanilla install)' }}.
       Control-plane pod scheduling is enabled.
-      No CNI was installed automatically — install your preferred CNI (configured podSubnet: {{ kubernetes_pod_network_cidr }}) for the node to become Ready.
+      Install a CNI plugin (configured podSubnet: {{ kubernetes_pod_network_cidr }}) for the node to become Ready.
   when: _kubernetes_kubeadm_init is changed
