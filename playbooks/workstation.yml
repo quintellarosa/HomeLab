@@ -15,6 +15,7 @@
   roles:
     #- Bluetooth
     - EssentialTools
+    - UbuntuGnome
     - UserAvatar
     - GoogleChrome
     - GoogleAntigravityIDE
