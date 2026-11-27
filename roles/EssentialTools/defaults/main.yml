@@ -1,0 +1,16 @@
+---
+essential_tools_common_packages:
+  - git
+  - curl
+
+essential_tools_os_packages:
+  Debian:
+    - vim
+  RedHat:
+    - vim-enhanced
+
+essential_tools_packages: >-
+  {{
+    essential_tools_common_packages
+    + essential_tools_os_packages.get(ansible_facts['os_family'], [])
+  }}

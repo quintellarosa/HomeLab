@@ -1,0 +1,6 @@
+---
+antigravity_ide_install_dir: /opt/antigravity-ide
+antigravity_ide_download_page_url: https://antigravity.google/download/
+# Set to a direct tarball URL to pin a specific version instead of resolving the latest release.
+antigravity_ide_download_url: ""
+antigravity_ide_configure_apparmor: true

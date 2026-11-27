@@ -2,3 +2,5 @@ all:
   hosts:
     localhost:
       ansible_connection: local
+      # Ubuntu 26.04 defaults /usr/bin/sudo to sudo-rs; use sudo.ws when present, standard sudo on RedHat/other distros.
+      ansible_become_exe: "{{ 'sudo.ws' if (lookup('ansible.builtin.fileglob', '/usr/bin/sudo.ws') | length > 0) else 'sudo' }}"

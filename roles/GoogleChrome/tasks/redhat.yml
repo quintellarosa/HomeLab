@@ -1,0 +1,15 @@
+---
+- name: Import Google Chrome RPM GPG key
+  ansible.builtin.rpm_key:
+    key: "{{ google_chrome_gpg_key_url }}"
+    state: present
+
+- name: Add Google Chrome YUM/DNF repository
+  ansible.builtin.yum_repository:
+    name: google-chrome
+    description: Google Chrome
+    baseurl: "{{ google_chrome_rpm_repo_baseurl }}"
+    enabled: true
+    gpgcheck: true
+    gpgkey: "{{ google_chrome_gpg_key_url }}"
+    state: present

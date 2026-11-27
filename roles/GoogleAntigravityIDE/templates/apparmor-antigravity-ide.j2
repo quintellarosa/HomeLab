@@ -1,0 +1,10 @@
+# Allow Antigravity IDE (Electron) to use unprivileged user namespaces on Ubuntu 24.04+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile antigravity-ide {{ antigravity_ide_install_dir }}/antigravity-ide flags=(unconfined) {
+  userns,
+
+  # Site-specific additions and overrides. See local/README for details.
+  include if exists <local/antigravity-ide>
+}

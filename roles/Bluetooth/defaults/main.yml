@@ -1,0 +1,5 @@
+---
+bluetooth_archive_file_path: "{{ bluetooth_archive_file | default(role_path ~ '/../../files/bluetooth.tar.gz', true) }}"
+bluetooth_packages:
+  - bluez
+bluetooth_service_name: bluetooth

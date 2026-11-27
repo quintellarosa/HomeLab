@@ -1,0 +1,5 @@
+---
+- name: Ensure essential CLI tools are installed
+  ansible.builtin.package:
+    name: "{{ essential_tools_packages }}"
+    state: present

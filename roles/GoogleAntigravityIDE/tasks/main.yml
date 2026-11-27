@@ -1,0 +1,259 @@
+---
+- name: Determine Antigravity IDE platform suffix for architecture
+  ansible.builtin.set_fact:
+    _antigravity_ide_platform: >-
+      {{
+        {
+          'x86_64': 'linux-x64',
+          'amd64': 'linux-x64',
+          'aarch64': 'linux-arm',
+          'arm64': 'linux-arm',
+        }[ansible_facts['architecture']] | default('')
+      }}
+
+- name: Ensure host architecture is supported by Antigravity IDE
+  ansible.builtin.assert:
+    that:
+      - _antigravity_ide_platform | length > 0
+    fail_msg: "Unsupported architecture '{{ ansible_facts['architecture'] }}' for Google Antigravity IDE (supported: x86_64, aarch64)."
+
+- name: Ensure required tools for archive download and extraction are installed
+  ansible.builtin.package:
+    name:
+      - ca-certificates
+      - tar
+      - gzip
+    state: present
+
+- name: Resolve latest official Antigravity IDE Linux tarball URL
+  when: antigravity_ide_download_url | default('') | length == 0
+  block:
+    - name: Fetch Google Antigravity download page
+      ansible.builtin.uri:
+        url: "{{ antigravity_ide_download_page_url }}"
+        return_content: true
+        status_code: 200
+      register: _antigravity_download_page
+      check_mode: false
+
+    - name: Extract latest Antigravity IDE tarball URL for {{ _antigravity_ide_platform }}
+      ansible.builtin.set_fact:
+        _antigravity_ide_resolved_url: >-
+          {{
+            _antigravity_download_page.content
+            | regex_search('https://edgedl\.me\.gvt1\.com/edgedl/release2/[^"\']+/' ~ _antigravity_ide_platform ~ '/Antigravity%20IDE\.tar\.gz')
+            | default('', true)
+          }}
+
+- name: Use pinned Antigravity IDE download URL
+  ansible.builtin.set_fact:
+    _antigravity_ide_resolved_url: "{{ antigravity_ide_download_url }}"
+  when: antigravity_ide_download_url | default('') | length > 0
+
+- name: Verify Antigravity IDE tarball URL was resolved
+  ansible.builtin.assert:
+    that:
+      - _antigravity_ide_resolved_url is defined
+      - _antigravity_ide_resolved_url | length > 0
+    fail_msg: >-
+      Could not resolve an official Antigravity IDE download URL for {{ _antigravity_ide_platform }}
+      from {{ antigravity_ide_download_page_url }}. Set antigravity_ide_download_url explicitly to override.
+
+- name: Compute target Antigravity IDE release identifier
+  ansible.builtin.set_fact:
+    _antigravity_ide_target_release: >-
+      {{
+        (
+          (_antigravity_ide_resolved_url | regex_search('/stable/([^/]+)/', '\1'))
+          or [_antigravity_ide_resolved_url | hash('sha256')]
+        ) | first
+      }}
+
+- name: Check existing Antigravity IDE binary
+  ansible.builtin.stat:
+    path: "{{ antigravity_ide_install_dir }}/antigravity-ide"
+  register: _antigravity_ide_binary_stat
+
+- name: Check existing Antigravity IDE release marker
+  ansible.builtin.stat:
+    path: "{{ antigravity_ide_install_dir }}/.release"
+  register: _antigravity_ide_release_stat
+
+- name: Read currently installed Antigravity IDE release marker
+  ansible.builtin.slurp:
+    src: "{{ antigravity_ide_install_dir }}/.release"
+  register: _antigravity_ide_release_slurp
+  when: _antigravity_ide_release_stat.stat.exists
+
+- name: Determine whether Antigravity IDE needs to be installed or updated
+  ansible.builtin.set_fact:
+    _antigravity_ide_needs_install: >-
+      {{
+        (not _antigravity_ide_binary_stat.stat.exists)
+        or (not _antigravity_ide_release_stat.stat.exists)
+        or ((_antigravity_ide_release_slurp.content | b64decode | trim) != _antigravity_ide_target_release)
+      }}
+
+- name: Download and install Antigravity IDE ({{ _antigravity_ide_target_release }})
+  when: _antigravity_ide_needs_install | bool
+  block:
+    - name: Create temporary directory for Antigravity IDE download
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: antigravity-ide-
+      register: _antigravity_ide_tmp
+
+    - name: Download Antigravity IDE tarball
+      ansible.builtin.get_url:
+        url: "{{ _antigravity_ide_resolved_url }}"
+        dest: "{{ _antigravity_ide_tmp.path }}/antigravity-ide.tar.gz"
+        mode: "0644"
+        timeout: 300
+      when: _antigravity_ide_tmp.path is defined
+
+    - name: Remove previous Antigravity IDE installation directory
+      ansible.builtin.file:
+        path: "{{ antigravity_ide_install_dir }}"
+        state: absent
+
+    - name: Create Antigravity IDE installation directory
+      ansible.builtin.file:
+        path: "{{ antigravity_ide_install_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Extract Antigravity IDE tarball into {{ antigravity_ide_install_dir }}
+      ansible.builtin.unarchive:
+        src: "{{ _antigravity_ide_tmp.path }}/antigravity-ide.tar.gz"
+        dest: "{{ antigravity_ide_install_dir }}"
+        remote_src: true
+        owner: root
+        group: root
+        extra_opts:
+          - "--strip-components=1"
+          - "--no-same-owner"
+      when: _antigravity_ide_tmp.path is defined
+
+    - name: Write installed Antigravity IDE release marker
+      ansible.builtin.copy:
+        content: "{{ _antigravity_ide_target_release }}\n"
+        dest: "{{ antigravity_ide_install_dir }}/.release"
+        owner: root
+        group: root
+        mode: "0644"
+  always:
+    - name: Clean up temporary Antigravity IDE download directory
+      ansible.builtin.file:
+        path: "{{ _antigravity_ide_tmp.path }}"
+        state: absent
+      when:
+        - _antigravity_ide_tmp is defined
+        - _antigravity_ide_tmp.path is defined
+
+- name: Check if Electron chrome-sandbox helper exists
+  ansible.builtin.stat:
+    path: "{{ antigravity_ide_install_dir }}/chrome-sandbox"
+  register: _antigravity_ide_sandbox_stat
+
+- name: Ensure Electron chrome-sandbox has root SUID permissions
+  ansible.builtin.file:
+    path: "{{ antigravity_ide_install_dir }}/chrome-sandbox"
+    owner: root
+    group: root
+    mode: "04755"
+  when: _antigravity_ide_sandbox_stat.stat.exists
+
+- name: Create CLI symlinks for Antigravity IDE
+  ansible.builtin.file:
+    src: "{{ antigravity_ide_install_dir }}/bin/antigravity-ide"
+    dest: "/usr/local/bin/{{ item }}"
+    state: link
+    force: true
+  loop:
+    - antigravity-ide
+    - agy-ide
+
+- name: Symlink Antigravity IDE icon to /usr/share/pixmaps
+  ansible.builtin.file:
+    src: "{{ antigravity_ide_install_dir }}/resources/app/resources/linux/code.png"
+    dest: /usr/share/pixmaps/antigravity-ide.png
+    state: link
+    force: true
+
+- name: Install Antigravity IDE desktop entry
+  ansible.builtin.template:
+    src: antigravity-ide.desktop.j2
+    dest: /usr/share/applications/antigravity-ide.desktop
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Update desktop database
+
+- name: Install Antigravity IDE URL handler desktop entry
+  ansible.builtin.template:
+    src: antigravity-ide-url-handler.desktop.j2
+    dest: /usr/share/applications/antigravity-ide-url-handler.desktop
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Update desktop database
+
+- name: Determine Zsh completion directory for OS family
+  ansible.builtin.set_fact:
+    _antigravity_zsh_completion_dir: >-
+      {{
+        '/usr/share/zsh/vendor-completions'
+        if ansible_facts['os_family'] == 'Debian'
+        else '/usr/share/zsh/site-functions'
+      }}
+
+- name: Check shell completion directories
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: _antigravity_completion_dirs
+  loop:
+    - /usr/share/bash-completion/completions
+    - "{{ _antigravity_zsh_completion_dir }}"
+
+- name: Symlink bash completion for Antigravity IDE
+  ansible.builtin.file:
+    src: "{{ antigravity_ide_install_dir }}/resources/completions/bash/antigravity-ide"
+    dest: /usr/share/bash-completion/completions/antigravity-ide
+    state: link
+    force: true
+  when: _antigravity_completion_dirs.results[0].stat.exists
+
+- name: Symlink zsh completion for Antigravity IDE
+  ansible.builtin.file:
+    src: "{{ antigravity_ide_install_dir }}/resources/completions/zsh/_antigravity-ide"
+    dest: "{{ _antigravity_zsh_completion_dir }}/_antigravity-ide"
+    state: link
+    force: true
+  when: _antigravity_completion_dirs.results[1].stat.exists
+
+- name: Configure AppArmor profile for Ubuntu unprivileged userns restrictions (Debian)
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - antigravity_ide_configure_apparmor | bool
+  block:
+    - name: Check if AppArmor ABI 4.0 and apparmor_parser are available
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: _antigravity_apparmor_checks
+      loop:
+        - /etc/apparmor.d/abi/4.0
+        - /usr/sbin/apparmor_parser
+
+    - name: Install Antigravity IDE AppArmor profile
+      ansible.builtin.template:
+        src: apparmor-antigravity-ide.j2
+        dest: /etc/apparmor.d/antigravity-ide
+        owner: root
+        group: root
+        mode: "0644"
+      when:
+        - _antigravity_apparmor_checks.results[0].stat.exists
+        - _antigravity_apparmor_checks.results[1].stat.exists
+      notify: Reload Antigravity IDE AppArmor profile

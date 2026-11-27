@@ -1,0 +1,50 @@
+---
+- name: Ensure Bluetooth packages are installed
+  ansible.builtin.package:
+    name: "{{ bluetooth_packages }}"
+    state: present
+
+- name: Check if Bluetooth pairing archive exists
+  ansible.builtin.stat:
+    path: "{{ bluetooth_archive_file_path }}"
+  delegate_to: localhost
+  become: false
+  register: _bluetooth_archive_stat
+  when: bluetooth_archive_file_path | default('') | length > 0
+
+- name: Restore Bluetooth paired devices
+  when:
+    - bluetooth_archive_file_path | default('') | length > 0
+    - _bluetooth_archive_stat.stat.exists | default(false)
+  block:
+    - name: Ensure /var/lib/bluetooth exists
+      ansible.builtin.file:
+        path: /var/lib/bluetooth
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Extract Bluetooth pairing archive
+      ansible.builtin.unarchive:
+        src: "{{ bluetooth_archive_file_path }}"
+        dest: /var/lib/bluetooth
+        owner: root
+        group: root
+      register: _bluetooth_unarchive
+      notify: Restart bluetooth
+
+    - name: Restore SELinux contexts on /var/lib/bluetooth (RedHat)
+      ansible.builtin.command:
+        cmd: restorecon -RF /var/lib/bluetooth
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+        - _bluetooth_unarchive.changed | default(false)
+      changed_when: false
+
+- name: Ensure Bluetooth service is enabled and running
+  ansible.builtin.service:
+    name: "{{ bluetooth_service_name }}"
+    enabled: true
+    state: started

@@ -1,0 +1,38 @@
+---
+- name: Ensure /etc/apt/keyrings directory exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download Google Chrome APT signing key
+  ansible.builtin.get_url:
+    url: "{{ google_chrome_gpg_key_url }}"
+    dest: /etc/apt/keyrings/google-chrome.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Remove legacy .list repository file if present
+  ansible.builtin.file:
+    path: /etc/apt/sources.list.d/google-chrome.list
+    state: absent
+
+- name: Add Google Chrome DEB822 repository
+  ansible.builtin.deb822_repository:
+    name: google-chrome
+    types: deb
+    uris: "{{ google_chrome_deb_repo_uri }}"
+    suites: stable
+    components: main
+    architectures: amd64
+    signed_by: /etc/apt/keyrings/google-chrome.asc
+    state: present
+  register: _google_chrome_deb_repo
+
+- name: Update APT cache after configuring Google Chrome repository
+  ansible.builtin.apt:
+    update_cache: true
+  when: _google_chrome_deb_repo.changed
