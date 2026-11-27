@@ -11,12 +11,16 @@ virtualization_vfio_modules:
   - vfio
   - vfio_iommu_type1
   - vfio_pci
-# Optional list of PCI "vendor:device" IDs to bind to vfio-pci at boot
-# (e.g. ["10de:1fb9", "10de:10fa"]). Leave empty for dynamic libvirt passthrough.
-virtualization_vfio_pci_ids: []
-# Optional kernel driver names that must wait for vfio-pci when static PCI IDs are bound
-# (e.g. ["nouveau", "nvidia", "nvidia_drm"]).
-virtualization_vfio_softdeps: []
+
+# Optional list of PCI "vendor:device" IDs to bind to vfio-pci at boot.
+# 144d:a80a = Samsung PM9A1 476.9G NVMe SSD (02:00.0, IOMMU group 16).
+virtualization_vfio_pci_ids:
+  - "144d:a80a"
+
+# Kernel driver names that must wait for vfio-pci so vfio-pci claims the PCI IDs first.
+virtualization_vfio_softdeps:
+  - nvme
+  
 # Ignore unhandled MSRs in KVM (recommended for Windows / Windows Server guests)
 virtualization_kvm_ignore_msrs: true
 
