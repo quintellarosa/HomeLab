@@ -143,6 +143,41 @@
         - _virtualization_default_net.stdout is regex('Autostart:\s+no')
       changed_when: true
 
+    - name: Disable libvirt DHCP on default network when managed externally
+      when:
+        - not (virtualization_default_network_dhcp | bool)
+        - _virtualization_default_net.rc == 0
+      block:
+        - name: Dump default libvirt network XML
+          ansible.builtin.command:
+            cmd: virsh net-dumpxml default
+          register: _virtualization_default_net_xml
+          changed_when: false
+          check_mode: false
+
+        - name: Extract configured DHCP ranges from default libvirt network XML
+          ansible.builtin.set_fact:
+            _virtualization_default_dhcp_ranges: >-
+              {{
+                _virtualization_default_net_xml.stdout
+                | default('')
+                | regex_findall('<range\s+[^>]+/>')
+              }}
+
+        - name: Remove libvirt DHCP ranges from default network (live and persistent)
+          ansible.builtin.command:
+            argv:
+              - virsh
+              - net-update
+              - default
+              - delete
+              - ip-dhcp-range
+              - "{{ item }}"
+              - --live
+              - --config
+          loop: "{{ _virtualization_default_dhcp_ranges }}"
+          changed_when: true
+
 - name: Configure PCI-Express passthrough (IOMMU and VFIO)
   ansible.builtin.include_tasks: pcie_passthrough.yml
   when: virtualization_enable_pcie_passthrough | bool

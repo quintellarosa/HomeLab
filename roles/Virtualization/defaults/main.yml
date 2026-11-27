@@ -1,6 +1,8 @@
 ---
 virtualization_user: "{{ target_user | default(lookup('ansible.builtin.env', 'SUDO_USER') or lookup('ansible.builtin.env', 'USER'), true) }}"
 virtualization_enable_default_network: true
+# Disable libvirt built-in DHCP on the default network (e.g. when Windows Server provides DHCP)
+virtualization_default_network_dhcp: false
 virtualization_user_groups:
   - libvirt
   - kvm
