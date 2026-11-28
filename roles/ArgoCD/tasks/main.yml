@@ -1,0 +1,510 @@
+---
+- name: Ensure OS family is supported by ArgoCD role
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ['Debian', 'RedHat', 'Suse']
+    fail_msg: "Unsupported OS family '{{ ansible_facts['os_family'] }}' for ArgoCD role (supported: Debian, RedHat, Suse)."
+
+# ---------------------------------------------------------------------------
+# 1. Verify that this host is running a Kubernetes Master (control plane)
+# ---------------------------------------------------------------------------
+- name: Check Kubernetes master files on target host
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ argocd_kubeconfig }}"
+    - "{{ argocd_apiserver_manifest }}"
+  register: _argocd_master_files
+
+- name: Check if Kubernetes Master is running on this host
+  ansible.builtin.command:
+    cmd: >-
+      kubectl --kubeconfig {{ argocd_kubeconfig }}
+      get nodes -l node-role.kubernetes.io/control-plane
+      --no-headers
+  register: _argocd_master_running_cmd
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - _argocd_master_files.results[0].stat.exists
+    - _argocd_master_files.results[1].stat.exists
+
+- name: Record whether target host has a running Kubernetes Master
+  ansible.builtin.set_fact:
+    _argocd_has_running_master: >-
+      {{
+        (_argocd_master_files.results[0].stat.exists | default(false))
+        and (_argocd_master_files.results[1].stat.exists | default(false))
+        and (_argocd_master_running_cmd.rc | default(1) == 0)
+        and ((_argocd_master_running_cmd.stdout | default('') | trim | length) > 0)
+      }}
+
+- name: Skip ArgoCD role when target host does not have a running Kubernetes Master
+  ansible.builtin.debug:
+    msg: >-
+      Skipping ArgoCD role: no running Kubernetes Master (control plane) was detected on this host.
+  when: not (_argocd_has_running_master | bool)
+
+# ---------------------------------------------------------------------------
+# 2. Deploy Argo CD, configure TLS/CA, Admin password, Keycloak OIDC & Ingress
+# ---------------------------------------------------------------------------
+- name: Deploy and configure Argo CD on Kubernetes Master
+  when: _argocd_has_running_master | bool
+  block:
+    - name: Verify Argo CD admin password is provided via Ansible Vault
+      ansible.builtin.assert:
+        that:
+          - (argocd_admin_password | length) >= 8
+        fail_msg: >-
+          Missing or too short Argo CD admin password ('argocd_admin_password').
+          Edit 'vault/vault.yml' (ansible-vault edit vault/vault.yml) defining
+          'vault_argocd_admin_password' (>= 8 chars), then run with '--ask-vault-pass'.
+
+    - name: Map host architecture for Argo CD CLI download
+      ansible.builtin.set_fact:
+        _argocd_arch: >-
+          {{
+            'amd64' if ansible_facts['architecture'] in ['x86_64', 'amd64']
+            else ('arm64' if ansible_facts['architecture'] in ['aarch64', 'arm64'] else ansible_facts['architecture'])
+          }}
+
+    - name: Check existing Argo CD CLI version
+      ansible.builtin.command:
+        cmd: "{{ argocd_cli_bin_path }} version --client --short"
+      register: _argocd_cli_ver
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: argocd_install_cli | bool
+
+    - name: Install Argo CD CLI {{ argocd_version }}
+      ansible.builtin.get_url:
+        url: "https://github.com/argoproj/argo-cd/releases/download/{{ argocd_version }}/argocd-linux-{{ _argocd_arch }}"
+        dest: "{{ argocd_cli_bin_path }}"
+        owner: root
+        group: root
+        mode: "0755"
+      when:
+        - argocd_install_cli | bool
+        - (_argocd_cli_ver.rc | default(1) != 0) or (argocd_version not in (_argocd_cli_ver.stdout | default('')))
+
+    - name: Ensure Argo CD manifest directory exists
+      ansible.builtin.file:
+        path: "{{ argocd_manifest_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download Argo CD {{ argocd_version }} upstream manifest
+      ansible.builtin.get_url:
+        url: "{{ argocd_manifest_url }}"
+        dest: "{{ argocd_manifest_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when: not ansible_check_mode
+      register: _argocd_manifest_dl
+
+    - name: Ensure Argo CD namespace exists
+      ansible.builtin.shell:
+        cmd: >-
+          kubectl --kubeconfig {{ argocd_kubeconfig }} create namespace {{ argocd_namespace }}
+          --dry-run=client -o yaml
+          | kubectl --kubeconfig {{ argocd_kubeconfig }} apply -f -
+      when: not ansible_check_mode
+      register: _argocd_ns_apply
+      changed_when: "'created' in _argocd_ns_apply.stdout"
+
+    - name: Check if Argo CD server deployment already exists
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ argocd_kubeconfig }}
+          -n {{ argocd_namespace }} get deployment argocd-server
+      register: _argocd_server_exists
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Apply Argo CD {{ argocd_version }} manifest (server-side apply)
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ argocd_kubeconfig }}
+          -n {{ argocd_namespace }}
+          apply --server-side --force-conflicts -f {{ argocd_manifest_file }}
+      when:
+        - not ansible_check_mode
+        - (_argocd_manifest_dl is changed) or (_argocd_server_exists.rc | default(1) != 0)
+      register: _argocd_manifest_apply
+      changed_when: true
+
+    - name: Wait for core Argo CD deployments to become Ready
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ argocd_kubeconfig }}
+          -n {{ argocd_namespace }}
+          rollout status deployment/{{ item }} --timeout=300s
+      loop:
+        - argocd-redis
+        - argocd-repo-server
+        - argocd-server
+        - argocd-dex-server
+        - argocd-applicationset-controller
+        - argocd-notifications-controller
+      when: not ansible_check_mode
+      changed_when: false
+
+    - name: Wait for Argo CD application controller StatefulSet to become Ready
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ argocd_kubeconfig }}
+          -n {{ argocd_namespace }}
+          rollout status statefulset/argocd-application-controller --timeout=300s
+      when: not ansible_check_mode
+      changed_when: false
+
+    - name: Configure Argo CD admin password, HomeLab CA trust, insecure ingress mode, Keycloak OIDC, and RBAC
+      when: not ansible_check_mode
+      no_log: true
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import base64
+            import datetime
+            import json
+            import os
+            import ssl
+            import subprocess
+            import sys
+            import urllib.error
+            import urllib.parse
+            import urllib.request
+
+            (
+                kubeconfig,
+                ns,
+                argocd_hostname,
+                admin_pass,
+                ca_file,
+                trusted_hosts_json,
+                oidc_enabled_str,
+                kc_hostname,
+                kc_realm,
+                kc_admin_user,
+                kc_admin_pass,
+                oidc_client_id,
+                oidc_client_secret,
+                rbac_default,
+                rbac_admins_json,
+                cli_bin,
+            ) = sys.argv[1:17]
+
+            trusted_hosts = json.loads(trusted_hosts_json)
+            rbac_admins = json.loads(rbac_admins_json)
+            oidc_enabled = oidc_enabled_str.lower() == "true"
+
+            ca_pem = ""
+            if ca_file and os.path.exists(ca_file):
+                with open(ca_file, "r", encoding="utf-8") as fh:
+                    ca_pem = fh.read().strip() + "\n"
+
+            def kctl(*args, stdin_data=None):
+                return subprocess.check_output(
+                    ["kubectl", "--kubeconfig", kubeconfig, "-n", ns, *args],
+                    input=stdin_data,
+                    text=True,
+                )
+
+            def get_json(kind, name):
+                return json.loads(kctl("get", kind, name, "-o", "json"))
+
+            def merge_configmap(name, updates):
+                cm = get_json("configmap", name)
+                cur = cm.get("data") or {}
+                to_patch = {k: v for k, v in updates.items() if cur.get(k) != v}
+                if not to_patch:
+                    return False
+                kctl("patch", "configmap", name, "--type=merge", "-p", json.dumps({"data": to_patch}))
+                return True
+
+            changed_server = False
+            changed_repo = False
+            changed_secret = False
+
+            # 1. Run argocd-server behind Cilium Envoy TLS termination (server.insecure: "true")
+            if merge_configmap("argocd-cmd-params-cm", {"server.insecure": "true"}):
+                changed_server = True
+
+            # 2. Trust HomeLab Root CA for GitLab HTTPS repositories & Keycloak OIDC
+            if ca_pem and trusted_hosts:
+                tls_updates = {h: ca_pem for h in trusted_hosts if h}
+                if merge_configmap("argocd-tls-certs-cm", tls_updates):
+                    changed_server = True
+                    changed_repo = True
+
+            # 3. Auto-provision confidential OIDC client 'argocd' in Keycloak when reachable
+            oidc_active = False
+            kc_url = f"https://{kc_hostname}"
+            if oidc_enabled and not oidc_client_secret and kc_admin_pass:
+                ctx = ssl.create_default_context()
+                if ca_file and os.path.exists(ca_file):
+                    ctx.load_verify_locations(cafile=ca_file)
+
+                def kc_req(method, path, data=None, token=None, form=False):
+                    headers = {}
+                    body = None
+                    if token:
+                        headers["Authorization"] = f"Bearer {token}"
+                    if data is not None:
+                        if form:
+                            body = urllib.parse.urlencode(data).encode()
+                            headers["Content-Type"] = "application/x-www-form-urlencoded"
+                        else:
+                            body = json.dumps(data).encode()
+                            headers["Content-Type"] = "application/json"
+                    req = urllib.request.Request(f"{kc_url}{path}", data=body, headers=headers, method=method)
+                    try:
+                        with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
+                            raw = resp.read().decode()
+                            return resp.status, (json.loads(raw) if raw else None)
+                    except urllib.error.HTTPError as exc:
+                        raw = exc.read().decode() if exc.fp else ""
+                        return exc.code, raw
+                    except Exception:
+                        return 0, None
+
+                st, tok = kc_req(
+                    "POST",
+                    "/realms/master/protocol/openid-connect/token",
+                    data={
+                        "grant_type": "password",
+                        "client_id": "admin-cli",
+                        "username": kc_admin_user,
+                        "password": kc_admin_pass,
+                    },
+                    form=True,
+                )
+                if st == 200 and isinstance(tok, dict) and tok.get("access_token"):
+                    token = tok["access_token"]
+                    st_r, _ = kc_req("GET", f"/admin/realms/{kc_realm}", token=token)
+                    if st_r == 200:
+                        st_c, clients = kc_req(
+                            "GET",
+                            f"/admin/realms/{kc_realm}/clients?clientId={urllib.parse.quote(oidc_client_id)}",
+                            token=token,
+                        )
+                        existing = next((c for c in (clients or []) if c.get("clientId") == oidc_client_id), None) if st_c == 200 else None
+                        redirect_uris = [
+                            f"https://{argocd_hostname}/auth/callback",
+                            "http://localhost:8085/auth/callback",
+                        ]
+                        web_origin = f"https://{argocd_hostname}"
+                        payload = {
+                            "clientId": oidc_client_id,
+                            "name": "Argo CD",
+                            "enabled": True,
+                            "protocol": "openid-connect",
+                            "publicClient": False,
+                            "standardFlowEnabled": True,
+                            "implicitFlowEnabled": False,
+                            "directAccessGrantsEnabled": False,
+                            "serviceAccountsEnabled": False,
+                            "redirectUris": redirect_uris,
+                            "webOrigins": [web_origin],
+                            "rootUrl": web_origin,
+                            "baseUrl": web_origin,
+                        }
+                        if not existing:
+                            st_cr, _ = kc_req("POST", f"/admin/realms/{kc_realm}/clients", data=payload, token=token)
+                            if st_cr in (200, 201, 204):
+                                st_c, clients = kc_req(
+                                    "GET",
+                                    f"/admin/realms/{kc_realm}/clients?clientId={urllib.parse.quote(oidc_client_id)}",
+                                    token=token,
+                                )
+                                existing = next((c for c in (clients or []) if c.get("clientId") == oidc_client_id), None)
+                        else:
+                            cur_uris = set(existing.get("redirectUris") or [])
+                            if not set(redirect_uris).issubset(cur_uris) or web_origin not in (existing.get("webOrigins") or []):
+                                merged = dict(existing)
+                                merged.update(payload)
+                                kc_req("PUT", f"/admin/realms/{kc_realm}/clients/{existing['id']}", data=merged, token=token)
+                        if existing and existing.get("id"):
+                            st_s, sec_obj = kc_req(
+                                "GET",
+                                f"/admin/realms/{kc_realm}/clients/{existing['id']}/client-secret",
+                                token=token,
+                            )
+                            if st_s == 200 and isinstance(sec_obj, dict) and sec_obj.get("value"):
+                                oidc_client_secret = sec_obj["value"]
+
+            if oidc_enabled and oidc_client_secret:
+                oidc_active = True
+
+            # 4. Update argocd-secret with admin.password (idempotent bcrypt check) & oidc.keycloak.clientSecret
+            sec = get_json("secret", "argocd-secret")
+            sec_data = sec.get("data") or {}
+            secret_string_patch = {}
+
+            existing_hash_b64 = sec_data.get("admin.password", "")
+            existing_hash = base64.b64decode(existing_hash_b64).decode() if existing_hash_b64 else ""
+            pass_matches = False
+            try:
+                import bcrypt
+                if existing_hash:
+                    pass_matches = bcrypt.checkpw(admin_pass.encode("utf-8"), existing_hash.encode("utf-8"))
+                if not pass_matches:
+                    new_hash = bcrypt.hashpw(admin_pass.encode("utf-8"), bcrypt.gensalt(rounds=10)).decode("utf-8")
+                    secret_string_patch["admin.password"] = new_hash
+                    secret_string_patch["admin.passwordMtime"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            except ImportError:
+                if not existing_hash:
+                    new_hash = subprocess.check_output(
+                        [cli_bin, "account", "bcrypt", "--password", admin_pass],
+                        text=True,
+                    ).strip()
+                    secret_string_patch["admin.password"] = new_hash
+                    secret_string_patch["admin.passwordMtime"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            if oidc_active:
+                cur_oidc_b64 = sec_data.get("oidc.keycloak.clientSecret", "")
+                cur_oidc = base64.b64decode(cur_oidc_b64).decode() if cur_oidc_b64 else ""
+                if cur_oidc != oidc_client_secret:
+                    secret_string_patch["oidc.keycloak.clientSecret"] = oidc_client_secret
+
+            if secret_string_patch:
+                kctl("patch", "secret", "argocd-secret", "--type=merge", "-p", json.dumps({"stringData": secret_string_patch}))
+                changed_secret = True
+
+            # Remove temporary argocd-initial-admin-secret once vault admin password is set
+            subprocess.call(
+                ["kubectl", "--kubeconfig", kubeconfig, "-n", ns, "delete", "secret", "argocd-initial-admin-secret", "--ignore-not-found=true"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            # 5. Update argocd-cm (url + optional Keycloak OIDC config)
+            cm_updates = {"url": f"https://{argocd_hostname}"}
+            if oidc_active:
+                oidc_lines = [
+                    "name: Keycloak",
+                    f"issuer: {kc_url}/realms/{kc_realm}",
+                    f"clientID: {oidc_client_id}",
+                    "clientSecret: $oidc.keycloak.clientSecret",
+                    "requestedScopes:",
+                    "  - openid",
+                    "  - profile",
+                    "  - email",
+                ]
+                if ca_pem:
+                    oidc_lines.append("rootCA: |")
+                    for pem_line in ca_pem.strip().splitlines():
+                        oidc_lines.append(f"  {pem_line}")
+                cm_updates["oidc.config"] = "\n".join(oidc_lines) + "\n"
+            if merge_configmap("argocd-cm", cm_updates):
+                changed_server = True
+
+            # 6. Update argocd-rbac-cm so Keycloak/AD admin users receive role:admin
+            policy_lines = [f"g, {subj}, role:admin" for subj in rbac_admins if subj]
+            rbac_updates = {
+                "policy.default": rbac_default,
+                "policy.csv": "\n".join(policy_lines) + ("\n" if policy_lines else ""),
+                "scopes": "[preferred_username, groups, email]",
+            }
+            if merge_configmap("argocd-rbac-cm", rbac_updates):
+                changed_server = True
+
+            print(json.dumps({
+                "changed": changed_server or changed_repo or changed_secret,
+                "restart_server": changed_server or changed_secret,
+                "restart_repo": changed_repo,
+                "oidc_active": oidc_active,
+            }))
+          - "{{ argocd_kubeconfig }}"
+          - "{{ argocd_namespace }}"
+          - "{{ argocd_hostname }}"
+          - "{{ argocd_admin_password }}"
+          - "{{ argocd_ca_cert_file }}"
+          - "{{ argocd_trusted_tls_hosts | to_json }}"
+          - "{{ argocd_oidc_enabled | string }}"
+          - "{{ argocd_keycloak_hostname }}"
+          - "{{ argocd_oidc_keycloak_realm }}"
+          - "{{ argocd_oidc_keycloak_admin_user }}"
+          - "{{ argocd_oidc_keycloak_admin_password }}"
+          - "{{ argocd_oidc_client_id }}"
+          - "{{ argocd_oidc_client_secret }}"
+          - "{{ argocd_rbac_default_policy }}"
+          - "{{ argocd_rbac_admin_subjects | to_json }}"
+          - "{{ argocd_cli_bin_path }}"
+      register: _argocd_config_result
+      changed_when: "(_argocd_config_result.stdout | default('{}') | from_json).changed | default(false)"
+
+    - name: Render Argo CD Ingress manifest
+      ansible.builtin.template:
+        src: argocd-ingress.yaml.j2
+        dest: "{{ argocd_manifest_dir }}/argocd-ingress.yaml"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply Argo CD Ingress manifest
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ argocd_kubeconfig }}
+          apply -f {{ argocd_manifest_dir }}/argocd-ingress.yaml
+      when: not ansible_check_mode
+      register: _argocd_ingress_apply
+      changed_when: >-
+        ('created' in _argocd_ingress_apply.stdout)
+        or ('configured' in _argocd_ingress_apply.stdout)
+
+    - name: Restart argocd-server after configuration changes
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ argocd_kubeconfig }}
+          -n {{ argocd_namespace }}
+          rollout restart deployment/argocd-server
+      when:
+        - not ansible_check_mode
+        - (_argocd_config_result.stdout | default('{}') | from_json).restart_server | default(false)
+      changed_when: true
+
+    - name: Restart argocd-repo-server after CA trust changes
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ argocd_kubeconfig }}
+          -n {{ argocd_namespace }}
+          rollout restart deployment/argocd-repo-server
+      when:
+        - not ansible_check_mode
+        - (_argocd_config_result.stdout | default('{}') | from_json).restart_repo | default(false)
+      changed_when: true
+
+    - name: Wait for argocd-server and argocd-repo-server rollouts after restart
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ argocd_kubeconfig }}
+          -n {{ argocd_namespace }}
+          rollout status deployment/{{ item }} --timeout=300s
+      loop:
+        - argocd-server
+        - argocd-repo-server
+      when:
+        - not ansible_check_mode
+        - >-
+          ((_argocd_config_result.stdout | default('{}') | from_json).restart_server | default(false))
+          or ((_argocd_config_result.stdout | default('{}') | from_json).restart_repo | default(false))
+      changed_when: false
+
+    - name: Report Argo CD deployment summary
+      ansible.builtin.debug:
+        msg: >-
+          Argo CD ({{ argocd_version }}) is active in namespace '{{ argocd_namespace }}'
+          (Keycloak OIDC SSO: {{ (_argocd_config_result.stdout | default('{}') | from_json).oidc_active | default(false) }}).
+          Web UI: https://{{ argocd_hostname }} (local user: admin; CLI: argocd login {{ argocd_hostname }} --grpc-web).
+      when:
+        - not ansible_check_mode
+        - (_argocd_manifest_apply is changed) or (_argocd_config_result is changed) or (_argocd_ingress_apply is changed)

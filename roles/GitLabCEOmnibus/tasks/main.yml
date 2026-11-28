@@ -1,0 +1,525 @@
+---
+- name: Ensure OS family is supported by GitLabCEOmnibus role
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ['Debian', 'RedHat', 'Suse']
+    fail_msg: "Unsupported OS family '{{ ansible_facts['os_family'] }}' for GitLabCEOmnibus role (supported: Debian, RedHat, Suse)."
+
+# ---------------------------------------------------------------------------
+# 1. Verify global 'postgresql' config and running Kubernetes Master
+# ---------------------------------------------------------------------------
+- name: Verify global 'postgresql.gitlab' inventory variable is defined
+  ansible.builtin.assert:
+    that:
+      - postgresql is defined
+      - postgresql is mapping
+      - postgresql.gitlab is defined
+      - postgresql.gitlab is mapping
+      - gitlab_pg_host | default('') | length > 0
+      - gitlab_pg_database | default('') | length > 0
+      - gitlab_pg_user | default('') | length > 0
+    fail_msg: >-
+      Global inventory variable 'postgresql.gitlab' is missing required fields (host, port, database, user).
+
+- name: Check Kubernetes master files on target host
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ gitlab_kubeconfig }}"
+    - "{{ gitlab_apiserver_manifest }}"
+  register: _gitlab_master_files
+
+- name: Check if Kubernetes Master is running on this host
+  ansible.builtin.command:
+    cmd: >-
+      kubectl --kubeconfig {{ gitlab_kubeconfig }}
+      get nodes -l node-role.kubernetes.io/control-plane
+      --no-headers
+  register: _gitlab_master_running_cmd
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - _gitlab_master_files.results[0].stat.exists
+    - _gitlab_master_files.results[1].stat.exists
+
+- name: Record whether target host has a running Kubernetes Master
+  ansible.builtin.set_fact:
+    _gitlab_has_running_master: >-
+      {{
+        (_gitlab_master_files.results[0].stat.exists | default(false))
+        and (_gitlab_master_files.results[1].stat.exists | default(false))
+        and (_gitlab_master_running_cmd.rc | default(1) == 0)
+        and ((_gitlab_master_running_cmd.stdout | default('') | trim | length) > 0)
+      }}
+
+- name: Skip GitLabCEOmnibus role when target host does not have a running Kubernetes Master
+  ansible.builtin.debug:
+    msg: >-
+      Skipping GitLabCEOmnibus role: no running Kubernetes Master (control plane) was detected on this host.
+  when: not (_gitlab_has_running_master | bool)
+
+# ---------------------------------------------------------------------------
+# 2. Provision external PostgreSQL DB/extensions/access and deploy GitLab CE
+# ---------------------------------------------------------------------------
+- name: Deploy GitLab CE Omnibus connected to external PostgreSQL
+  when: _gitlab_has_running_master | bool
+  block:
+    - name: Verify GitLab database and root passwords are provided via Ansible Vault
+      ansible.builtin.assert:
+        that:
+          - (gitlab_pg_password | length) >= 8
+          - (gitlab_root_password | length) >= 8
+        fail_msg: >-
+          Missing or too short GitLab passwords ('gitlab_pg_password' / 'gitlab_root_password').
+          Edit the encrypted vault file 'vault/vault.yml' (ansible-vault edit vault/vault.yml) defining
+          'vault_gitlab_pg_password' and 'vault_gitlab_root_password' (>= 8 chars), then run with '--ask-vault-pass'.
+
+    - name: Check if local PostgreSQL server (psql) is installed
+      ansible.builtin.stat:
+        path: /usr/bin/psql
+      register: _gitlab_local_psql_bin
+
+    - name: Ensure GitLab role, database, and required extensions exist on local PostgreSQL
+      when:
+        - gitlab_manage_local_postgres_db | bool
+        - _gitlab_local_psql_bin.stat.exists
+        - gitlab_pg_host in (ansible_facts['all_ipv4_addresses'] | default([]) + ['127.0.0.1', 'localhost'])
+        - not ansible_check_mode
+      no_log: true
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import subprocess
+            import sys
+
+            db_user, db_pass, db_name = sys.argv[1:4]
+            changed = False
+
+            def run_psql(sql, dbname="postgres", vars_dict=None):
+                cmd = ["/usr/sbin/runuser", "-u", "postgres", "--", "psql", "-v", "ON_ERROR_STOP=1", "-tA", "-d", dbname]
+                for k, v in (vars_dict or {}).items():
+                    cmd += ["-v", f"{k}={v}"]
+                cmd += ["-f", "-"]
+                return subprocess.check_output(cmd, input=sql + "\n", text=True).strip()
+
+            role_exists = run_psql("SELECT 1 FROM pg_roles WHERE rolname = :'u';", vars_dict={"u": db_user})
+            if role_exists != "1":
+                run_psql("CREATE ROLE :\"u\" LOGIN PASSWORD :'p';", vars_dict={"u": db_user, "p": db_pass})
+                changed = True
+            else:
+                run_psql("ALTER ROLE :\"u\" WITH LOGIN PASSWORD :'p';", vars_dict={"u": db_user, "p": db_pass})
+
+            db_exists = run_psql("SELECT 1 FROM pg_database WHERE datname = :'d';", vars_dict={"d": db_name})
+            if db_exists != "1":
+                run_psql("CREATE DATABASE :\"d\" OWNER :\"u\" ENCODING 'UTF8';", vars_dict={"d": db_name, "u": db_user})
+                changed = True
+
+            run_psql("GRANT ALL PRIVILEGES ON DATABASE :\"d\" TO :\"u\";", vars_dict={"d": db_name, "u": db_user})
+            run_psql("GRANT ALL ON SCHEMA public TO :\"u\";", dbname=db_name, vars_dict={"u": db_user})
+
+            # GitLab requires pg_trgm, btree_gist, and plpgsql extensions
+            for ext in ("pg_trgm", "btree_gist", "plpgsql"):
+                ext_exists = run_psql("SELECT 1 FROM pg_extension WHERE extname = :'e';", dbname=db_name, vars_dict={"e": ext})
+                if ext_exists != "1":
+                    run_psql("CREATE EXTENSION IF NOT EXISTS :\"e\";", dbname=db_name, vars_dict={"e": ext})
+                    changed = True
+
+            print("CHANGED" if changed else "UNCHANGED")
+          - "{{ gitlab_pg_user }}"
+          - "{{ gitlab_pg_password }}"
+          - "{{ gitlab_pg_database }}"
+      register: _gitlab_pg_provision
+      changed_when: "'CHANGED' in _gitlab_pg_provision.stdout"
+
+    - name: Allow Kubernetes pod network to reach local PostgreSQL for GitLab
+      when:
+        - gitlab_manage_local_postgres_db | bool
+        - _gitlab_local_psql_bin.stat.exists
+        - gitlab_pg_host in (ansible_facts['all_ipv4_addresses'] | default([]) + ['127.0.0.1', 'localhost'])
+      block:
+        - name: Query active PostgreSQL hba_file path
+          ansible.builtin.command:
+            argv:
+              - /usr/sbin/runuser
+              - -u
+              - postgres
+              - --
+              - psql
+              - -tA
+              - -c
+              - "SHOW hba_file;"
+          register: _gitlab_pg_hba_file_cmd
+          changed_when: false
+          check_mode: false
+
+        - name: Allow GitLab pods ({{ gitlab_pod_network_cidr }}) in PostgreSQL pg_hba.conf
+          ansible.builtin.blockinfile:
+            path: "{{ _gitlab_pg_hba_file_cmd.stdout | trim }}"
+            marker: "# {mark} ANSIBLE MANAGED BLOCK - HomeLab GitLab PostgreSQL access"
+            block: |
+              host    {{ gitlab_pg_database }}    {{ gitlab_pg_user }}    {{ gitlab_pod_network_cidr }}    {{ gitlab_pg_hba_auth_method }}
+          when: (_gitlab_pg_hba_file_cmd.stdout | trim | length) > 0
+          notify: Reload PostgreSQL configuration for GitLab
+
+        - name: Check current PostgreSQL max_locks_per_transaction
+          ansible.builtin.command:
+            argv:
+              - /usr/sbin/runuser
+              - -u
+              - postgres
+              - --
+              - psql
+              - -tA
+              - -c
+              - "SHOW max_locks_per_transaction;"
+          register: _gitlab_pg_max_locks
+          changed_when: false
+          check_mode: false
+
+        - name: Increase PostgreSQL max_locks_per_transaction for GitLab schema migrations
+          ansible.builtin.command:
+            argv:
+              - /usr/sbin/runuser
+              - -u
+              - postgres
+              - --
+              - psql
+              - -v
+              - ON_ERROR_STOP=1
+              - -c
+              - "ALTER SYSTEM SET max_locks_per_transaction = {{ gitlab_pg_max_locks_per_transaction | int }};"
+          when:
+            - not ansible_check_mode
+            - (_gitlab_pg_max_locks.stdout | default('64') | trim | int) < (gitlab_pg_max_locks_per_transaction | int)
+          changed_when: true
+          notify: Restart PostgreSQL service for GitLab
+
+        - name: Check if local PostgreSQL is listening on {{ gitlab_pg_host }}:{{ gitlab_pg_port }}
+          ansible.builtin.command:
+            cmd: "ss -tlnH sport = :{{ gitlab_pg_port }}"
+          register: _gitlab_pg_listen_sockets
+          changed_when: false
+          failed_when: false
+          check_mode: false
+
+        - name: Restart local PostgreSQL if it is not yet listening on {{ gitlab_pg_host }}:{{ gitlab_pg_port }}
+          ansible.builtin.service:
+            name: "{{ gitlab_pg_service_name }}"
+            state: restarted
+          when:
+            - not ansible_check_mode
+            - gitlab_pg_host not in ['127.0.0.1', 'localhost']
+            - (gitlab_pg_host ~ ':' ~ (gitlab_pg_port | string)) not in (_gitlab_pg_listen_sockets.stdout | default(''))
+            - ('0.0.0.0:' ~ (gitlab_pg_port | string)) not in (_gitlab_pg_listen_sockets.stdout | default(''))
+            - ('[::]:' ~ (gitlab_pg_port | string)) not in (_gitlab_pg_listen_sockets.stdout | default(''))
+
+        - name: Check if UFW is installed for GitLab PostgreSQL firewall rule (Debian)
+          ansible.builtin.stat:
+            path: /usr/sbin/ufw
+          register: _gitlab_pg_ufw_bin
+          when:
+            - gitlab_configure_pg_firewall | bool
+            - ansible_facts['os_family'] == 'Debian'
+
+        - name: Allow Kubernetes pod CIDR to reach PostgreSQL port in UFW (Debian)
+          ansible.builtin.command:
+            cmd: >-
+              ufw allow
+              from {{ gitlab_pod_network_cidr }}
+              to any port {{ gitlab_pg_port }}
+              proto tcp
+              comment 'HomeLab GitLab PostgreSQL'
+          register: _gitlab_pg_ufw_rule
+          changed_when: >-
+            'Rule added' in _gitlab_pg_ufw_rule.stdout
+            or 'Rules updated' in _gitlab_pg_ufw_rule.stdout
+          when:
+            - gitlab_configure_pg_firewall | bool
+            - ansible_facts['os_family'] == 'Debian'
+            - _gitlab_pg_ufw_bin.stat.exists | default(false)
+
+        - name: Gather service facts to detect firewalld (RedHat / SUSE)
+          ansible.builtin.service_facts:
+          when:
+            - gitlab_configure_pg_firewall | bool
+            - ansible_facts['os_family'] in ['RedHat', 'Suse']
+
+        - name: Allow Kubernetes pod CIDR to reach PostgreSQL port in firewalld (RedHat / SUSE)
+          when:
+            - gitlab_configure_pg_firewall | bool
+            - ansible_facts['os_family'] in ['RedHat', 'Suse']
+            - "'firewalld.service' in ansible_facts.services"
+            - ansible_facts.services['firewalld.service'].state == 'running'
+          block:
+            - name: Set firewalld rich rule for GitLab pod access to PostgreSQL
+              ansible.builtin.set_fact:
+                _gitlab_pg_firewalld_rule: >-
+                  rule family="ipv4" source address="{{ gitlab_pod_network_cidr }}" port port="{{ gitlab_pg_port }}" protocol="tcp" accept
+
+            - name: Check whether GitLab PostgreSQL rich rule exists in firewalld
+              ansible.builtin.command:
+                argv:
+                  - firewall-cmd
+                  - --permanent
+                  - "--query-rich-rule={{ _gitlab_pg_firewalld_rule }}"
+              register: _gitlab_pg_firewalld_query
+              changed_when: false
+              failed_when: false
+              check_mode: false
+
+            - name: Add GitLab PostgreSQL rich rule to firewalld
+              ansible.builtin.command:
+                argv:
+                  - firewall-cmd
+                  - --permanent
+                  - "--add-rich-rule={{ _gitlab_pg_firewalld_rule }}"
+              when: _gitlab_pg_firewalld_query.rc != 0
+              changed_when: true
+              register: _gitlab_pg_firewalld_added
+
+            - name: Reload firewalld to apply GitLab PostgreSQL rule
+              ansible.builtin.command:
+                cmd: firewall-cmd --reload
+              when: _gitlab_pg_firewalld_added is changed
+              changed_when: true
+
+        - name: Flush PostgreSQL handlers before deploying GitLab
+          ansible.builtin.meta: flush_handlers
+
+    - name: Ensure GitLab namespace exists
+      ansible.builtin.shell:
+        cmd: >-
+          kubectl --kubeconfig {{ gitlab_kubeconfig }} create namespace {{ gitlab_namespace }}
+          --dry-run=client -o yaml
+          | kubectl --kubeconfig {{ gitlab_kubeconfig }} apply -f -
+      when: not ansible_check_mode
+      register: _gitlab_ns_apply
+      changed_when: "'created' in _gitlab_ns_apply.stdout"
+
+    - name: Create or update GitLab Omnibus config and root password Secret
+      when: not ansible_check_mode
+      no_log: true
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json
+            import subprocess
+            import sys
+
+            (
+                kubeconfig,
+                ns,
+                secret_name,
+                hostname,
+                pg_host,
+                pg_port,
+                pg_db,
+                pg_user,
+                pg_pass,
+                pg_sslmode,
+                root_pass,
+                ssh_port,
+                puma_workers,
+                sidekiq_conc,
+                prom_enabled,
+                pod_cidr,
+            ) = sys.argv[1:17]
+
+            def rb_str(val):
+                return json.dumps(val)
+
+            omnibus_rb = "\n".join([
+                "require 'fileutils'",
+                "if File.exist?('/etc/gitlab-ansible/ca/homelab-root-ca.crt')",
+                "  FileUtils.mkdir_p('/etc/gitlab/trusted-certs')",
+                "  FileUtils.cp('/etc/gitlab-ansible/ca/homelab-root-ca.crt', '/etc/gitlab/trusted-certs/homelab-root-ca.crt')",
+                "end",
+                "",
+                f"external_url {rb_str('https://' + hostname)}",
+                "",
+                "# TLS is terminated at Cilium Ingress (cert-manager homelab-ca)",
+                "gitlab_rails['nginx'] = {",
+                "  'listen_port' => 80,",
+                "  'listen_https' => false,",
+                "  'proxy_set_headers' => {",
+                "    'X-Forwarded-Proto' => 'https',",
+                "    'X-Forwarded-Ssl' => 'on'",
+                "  }",
+                "}",
+                "",
+                "# External PostgreSQL database",
+                "postgresql['enable'] = false",
+                "gitlab_rails['db_adapter'] = 'postgresql'",
+                "gitlab_rails['db_encoding'] = 'unicode'",
+                f"gitlab_rails['db_host'] = {rb_str(pg_host)}",
+                f"gitlab_rails['db_port'] = {int(pg_port)}",
+                f"gitlab_rails['db_database'] = {rb_str(pg_db)}",
+                f"gitlab_rails['db_username'] = {rb_str(pg_user)}",
+                f"gitlab_rails['db_password'] = {rb_str(pg_pass)}",
+                f"gitlab_rails['db_sslmode'] = {rb_str(pg_sslmode)}",
+                f"gitlab_rails['initial_root_password'] = {rb_str(root_pass)}",
+                "",
+                f"gitlab_rails['gitlab_shell_ssh_port'] = {int(ssh_port)}",
+                f"gitlab_rails['monitoring_whitelist'] = ['127.0.0.0/8', {rb_str(pod_cidr)}]",
+                "",
+                "# Workstation memory tuning",
+                f"puma['worker_processes'] = {int(puma_workers)}",
+                f"sidekiq['concurrency'] = {int(sidekiq_conc)}",
+                f"prometheus_monitoring['enable'] = {prom_enabled}",
+                "",
+            ])
+
+            secret = {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {"name": secret_name, "namespace": ns},
+                "type": "Opaque",
+                "stringData": {
+                    "root_password": root_pass,
+                    "gitlab-omnibus.rb": omnibus_rb,
+                },
+            }
+            out = subprocess.check_output(
+                ["kubectl", "--kubeconfig", kubeconfig, "apply", "-f", "-"],
+                input=json.dumps(secret),
+                text=True,
+            )
+            print(out.strip())
+          - "{{ gitlab_kubeconfig }}"
+          - "{{ gitlab_namespace }}"
+          - "{{ gitlab_name }}-secrets"
+          - "{{ gitlab_hostname }}"
+          - "{{ gitlab_pg_host }}"
+          - "{{ gitlab_pg_port | string }}"
+          - "{{ gitlab_pg_database }}"
+          - "{{ gitlab_pg_user }}"
+          - "{{ gitlab_pg_password }}"
+          - "{{ gitlab_pg_sslmode }}"
+          - "{{ gitlab_root_password }}"
+          - "{{ gitlab_ssh_port | string }}"
+          - "{{ gitlab_puma_workers | string }}"
+          - "{{ gitlab_sidekiq_concurrency | string }}"
+          - "{{ gitlab_enable_prometheus | bool | lower }}"
+          - "{{ gitlab_pod_network_cidr }}"
+      register: _gitlab_secret_apply
+      changed_when: >-
+        ('created' in _gitlab_secret_apply.stdout)
+        or ('configured' in _gitlab_secret_apply.stdout)
+
+    - name: Check if HomeLab Root CA certificate file exists for GitLab trust store
+      ansible.builtin.stat:
+        path: "{{ gitlab_ca_cert_file }}"
+      register: _gitlab_ca_cert_stat
+
+    - name: Create or update GitLab custom CA Secret from HomeLab Root CA
+      ansible.builtin.shell:
+        cmd: >-
+          kubectl --kubeconfig {{ gitlab_kubeconfig }}
+          -n {{ gitlab_namespace }} create secret generic {{ gitlab_ca_secret_name }}
+          --from-file=homelab-root-ca.crt={{ gitlab_ca_cert_file }}
+          --dry-run=client -o yaml
+          | kubectl --kubeconfig {{ gitlab_kubeconfig }} apply -f -
+      when:
+        - _gitlab_ca_cert_stat.stat.exists
+        - not ansible_check_mode
+      register: _gitlab_ca_secret_apply
+      changed_when: >-
+        ('created' in _gitlab_ca_secret_apply.stdout)
+        or ('configured' in _gitlab_ca_secret_apply.stdout)
+
+    - name: Ensure GitLab manifest directory exists
+      ansible.builtin.file:
+        path: "{{ gitlab_manifest_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Render GitLab CE Omnibus Kubernetes manifests
+      ansible.builtin.template:
+        src: gitlab.yaml.j2
+        dest: "{{ gitlab_manifest_dir }}/{{ gitlab_name }}.yaml"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply GitLab CE Omnibus Kubernetes manifests
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ gitlab_kubeconfig }}
+          apply -f {{ gitlab_manifest_dir }}/{{ gitlab_name }}.yaml
+      when: not ansible_check_mode
+      register: _gitlab_manifest_apply
+      changed_when: >-
+        ('created' in _gitlab_manifest_apply.stdout)
+        or ('configured' in _gitlab_manifest_apply.stdout)
+
+    - name: Restart GitLab deployment if Omnibus config secret changed
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ gitlab_kubeconfig }}
+          -n {{ gitlab_namespace }}
+          rollout restart deployment/{{ gitlab_name }}
+      when:
+        - not ansible_check_mode
+        - _gitlab_secret_apply is changed
+        - "'created' not in (_gitlab_manifest_apply.stdout | default(''))"
+      changed_when: true
+
+    - name: Wait for GitLab CE Omnibus deployment to become Ready (first boot may take several minutes)
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ gitlab_kubeconfig }}
+          -n {{ gitlab_namespace }}
+          rollout status deployment/{{ gitlab_name }} --timeout=600s
+      when: not ansible_check_mode
+      changed_when: false
+
+    - name: Check whether GitLab initial root admin user exists
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ gitlab_kubeconfig }}"
+          - -n
+          - "{{ gitlab_namespace }}"
+          - exec
+          - "deployment/{{ gitlab_name }}"
+          - --
+          - gitlab-rails
+          - runner
+          - "puts User.exists?(username: 'root')"
+      register: _gitlab_root_exists
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Seed initial GitLab database records and root admin user if missing
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ gitlab_kubeconfig }}"
+          - -n
+          - "{{ gitlab_namespace }}"
+          - exec
+          - "deployment/{{ gitlab_name }}"
+          - --
+          - gitlab-rake
+          - db:seed_fu
+      when:
+        - not ansible_check_mode
+        - "'true' not in (_gitlab_root_exists.stdout | default('') | lower)"
+      changed_when: true
+
+    - name: Report GitLab CE Omnibus deployment summary
+      ansible.builtin.debug:
+        msg: >-
+          GitLab CE Omnibus ({{ gitlab_image }}) is active in namespace '{{ gitlab_namespace }}'
+          connected to external PostgreSQL {{ gitlab_pg_host }}:{{ gitlab_pg_port }}/{{ gitlab_pg_database }}.
+          Web UI: https://{{ gitlab_hostname }} (user: root).
+      when: (_gitlab_manifest_apply is changed) or (_gitlab_secret_apply is changed)

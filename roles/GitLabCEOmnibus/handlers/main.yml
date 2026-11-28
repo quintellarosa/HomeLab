@@ -1,0 +1,10 @@
+---
+- name: Reload PostgreSQL configuration for GitLab
+  ansible.builtin.service:
+    name: "{{ gitlab_pg_service_name }}"
+    state: reloaded
+
+- name: Restart PostgreSQL service for GitLab
+  ansible.builtin.service:
+    name: "{{ gitlab_pg_service_name }}"
+    state: restarted

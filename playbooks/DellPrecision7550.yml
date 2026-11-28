@@ -1,7 +1,7 @@
 ---
-# Post-install notebook reconfiguration (Debian, RedHat & SUSE families)
-- name: Configure HomeLab personal notebook
-  hosts: localhost
+# Post-install Dell Precision 7550 configuration (Debian, RedHat & SUSE families)
+- name: Configure Dell Precision 7550
+  hosts: DellPrecision7550
   become: true
   gather_facts: true
   vars_files:
@@ -16,21 +16,25 @@
 
   roles:
     - NetworkValidation
-    #- Bluetooth
+    - Bluetooth
     - EssentialTools
     - UbuntuGnomeCustomization
     - GoogleChrome
     - GoogleAntigravityIDE
     - Thunderbird
     - InSync
-    - Virtualization
-    - PostgreSQL
-    - Docker
-    - K8sMasterInstall
-    - K8sCNICilium
-    - K8sMetalLB
-    - K8sCertManager
-    - SplitDNS
-    - K8sStorageClass
-    - AWXOperator
-    - AWX
+    - KVM
+    # - Docker
+    # - PostgreSQL
+    # - K8sMasterInstall
+    # - K8sCNICilium
+    # - K8sMetalLB
+    # - K8sCertManager
+    # - K8sStorageClass
+    # - SplitDNS
+    # - AWXOperator
+    # - AWX
+    # - GitLabCEOmnibus
+    # - Keycloak
+    # - Backstage
+    # - ArgoCD

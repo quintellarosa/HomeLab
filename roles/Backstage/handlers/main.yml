@@ -1,0 +1,5 @@
+---
+- name: Reload PostgreSQL configuration for Backstage
+  ansible.builtin.service:
+    name: "{{ backstage_pg_service_name }}"
+    state: reloaded

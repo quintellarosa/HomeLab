@@ -1,0 +1,696 @@
+---
+- name: Ensure OS family is supported by Keycloak role
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ['Debian', 'RedHat', 'Suse']
+    fail_msg: "Unsupported OS family '{{ ansible_facts['os_family'] }}' for Keycloak role (supported: Debian, RedHat, Suse)."
+
+# ---------------------------------------------------------------------------
+# 1. Verify per-service 'postgresql.keycloak' config and running K8s Master
+# ---------------------------------------------------------------------------
+- name: Verify global 'postgresql.keycloak' inventory variable is defined
+  ansible.builtin.assert:
+    that:
+      - postgresql is defined
+      - postgresql is mapping
+      - postgresql.keycloak is defined
+      - postgresql.keycloak is mapping
+      - keycloak_pg_host | default('') | length > 0
+      - keycloak_pg_database | default('') | length > 0
+      - keycloak_pg_user | default('') | length > 0
+    fail_msg: >-
+      Global inventory variable 'postgresql.keycloak' is missing required fields (host, port, database, user).
+
+- name: Check Kubernetes master files on target host
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ keycloak_kubeconfig }}"
+    - "{{ keycloak_apiserver_manifest }}"
+  register: _keycloak_master_files
+
+- name: Check if Kubernetes Master is running on this host
+  ansible.builtin.command:
+    cmd: >-
+      kubectl --kubeconfig {{ keycloak_kubeconfig }}
+      get nodes -l node-role.kubernetes.io/control-plane
+      --no-headers
+  register: _keycloak_master_running_cmd
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - _keycloak_master_files.results[0].stat.exists
+    - _keycloak_master_files.results[1].stat.exists
+
+- name: Record whether target host has a running Kubernetes Master
+  ansible.builtin.set_fact:
+    _keycloak_has_running_master: >-
+      {{
+        (_keycloak_master_files.results[0].stat.exists | default(false))
+        and (_keycloak_master_files.results[1].stat.exists | default(false))
+        and (_keycloak_master_running_cmd.rc | default(1) == 0)
+        and ((_keycloak_master_running_cmd.stdout | default('') | trim | length) > 0)
+      }}
+
+- name: Skip Keycloak role when target host does not have a running Kubernetes Master
+  ansible.builtin.debug:
+    msg: >-
+      Skipping Keycloak role: no running Kubernetes Master (control plane) was detected on this host.
+  when: not (_keycloak_has_running_master | bool)
+
+# ---------------------------------------------------------------------------
+# 2. Provision external PostgreSQL DB/access, deploy Keycloak, configure Realm/AD/OIDC
+# ---------------------------------------------------------------------------
+- name: Deploy Keycloak connected to external PostgreSQL and Active Directory
+  when: _keycloak_has_running_master | bool
+  block:
+    - name: Verify Keycloak passwords are provided via Ansible Vault
+      ansible.builtin.assert:
+        that:
+          - (keycloak_pg_password | length) >= 8
+          - (keycloak_admin_password | length) >= 8
+        fail_msg: >-
+          Missing or too short Keycloak passwords ('keycloak_pg_password' and/or 'keycloak_admin_password').
+          Edit 'vault/vault.yml' (ansible-vault edit vault/vault.yml) defining
+          'vault_keycloak_pg_password' and 'vault_keycloak_admin_password' (>= 8 chars),
+          then run with '--ask-vault-pass'.
+
+    - name: Check if local PostgreSQL server (psql) is installed
+      ansible.builtin.stat:
+        path: /usr/bin/psql
+      register: _keycloak_local_psql_bin
+
+    - name: Ensure Keycloak role and database exist on local external PostgreSQL
+      when:
+        - keycloak_manage_local_postgres_db | bool
+        - _keycloak_local_psql_bin.stat.exists
+        - keycloak_pg_host in (ansible_facts['all_ipv4_addresses'] | default([]) + ['127.0.0.1', 'localhost'])
+        - not ansible_check_mode
+      no_log: true
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import subprocess
+            import sys
+
+            db_user, db_pass, db_name = sys.argv[1:4]
+            changed = False
+
+            def run_psql(sql, dbname="postgres", vars_dict=None):
+                cmd = ["/usr/sbin/runuser", "-u", "postgres", "--", "psql", "-v", "ON_ERROR_STOP=1", "-tA", "-d", dbname]
+                for k, v in (vars_dict or {}).items():
+                    cmd += ["-v", f"{k}={v}"]
+                cmd += ["-f", "-"]
+                return subprocess.check_output(cmd, input=sql + "\n", text=True).strip()
+
+            role_exists = run_psql("SELECT 1 FROM pg_roles WHERE rolname = :'u';", vars_dict={"u": db_user})
+            if role_exists != "1":
+                run_psql("CREATE ROLE :\"u\" LOGIN PASSWORD :'p';", vars_dict={"u": db_user, "p": db_pass})
+                changed = True
+            else:
+                run_psql("ALTER ROLE :\"u\" WITH LOGIN PASSWORD :'p';", vars_dict={"u": db_user, "p": db_pass})
+
+            db_exists = run_psql("SELECT 1 FROM pg_database WHERE datname = :'d';", vars_dict={"d": db_name})
+            if db_exists != "1":
+                run_psql("CREATE DATABASE :\"d\" OWNER :\"u\" ENCODING 'UTF8';", vars_dict={"d": db_name, "u": db_user})
+                changed = True
+
+            run_psql("GRANT ALL PRIVILEGES ON DATABASE :\"d\" TO :\"u\";", vars_dict={"d": db_name, "u": db_user})
+            run_psql("GRANT ALL ON SCHEMA public TO :\"u\";", dbname=db_name, vars_dict={"u": db_user})
+
+            print("CHANGED" if changed else "UNCHANGED")
+          - "{{ keycloak_pg_user }}"
+          - "{{ keycloak_pg_password }}"
+          - "{{ keycloak_pg_database }}"
+      register: _keycloak_pg_provision
+      changed_when: "'CHANGED' in _keycloak_pg_provision.stdout"
+
+    - name: Allow Kubernetes pod network to reach local PostgreSQL for Keycloak
+      when:
+        - keycloak_manage_local_postgres_db | bool
+        - _keycloak_local_psql_bin.stat.exists
+        - keycloak_pg_host in (ansible_facts['all_ipv4_addresses'] | default([]) + ['127.0.0.1', 'localhost'])
+      block:
+        - name: Query active PostgreSQL hba_file path for Keycloak
+          ansible.builtin.command:
+            argv:
+              - /usr/sbin/runuser
+              - -u
+              - postgres
+              - --
+              - psql
+              - -tA
+              - -c
+              - "SHOW hba_file;"
+          register: _keycloak_pg_hba_file_cmd
+          changed_when: false
+          check_mode: false
+
+        - name: Allow Keycloak pods ({{ keycloak_pod_network_cidr }}) in PostgreSQL pg_hba.conf
+          ansible.builtin.blockinfile:
+            path: "{{ _keycloak_pg_hba_file_cmd.stdout | trim }}"
+            marker: "# {mark} ANSIBLE MANAGED BLOCK - HomeLab Keycloak PostgreSQL access"
+            block: |
+              host    {{ keycloak_pg_database }}    {{ keycloak_pg_user }}    {{ keycloak_pod_network_cidr }}    {{ keycloak_pg_hba_auth_method }}
+          when: (_keycloak_pg_hba_file_cmd.stdout | trim | length) > 0
+          notify: Reload PostgreSQL configuration for Keycloak
+
+        - name: Check if local PostgreSQL is listening on {{ keycloak_pg_host }}:{{ keycloak_pg_port }}
+          ansible.builtin.command:
+            cmd: "ss -tlnH sport = :{{ keycloak_pg_port }}"
+          register: _keycloak_pg_listen_sockets
+          changed_when: false
+          failed_when: false
+          check_mode: false
+
+        - name: Restart local PostgreSQL if it is not yet listening on {{ keycloak_pg_host }}:{{ keycloak_pg_port }}
+          ansible.builtin.service:
+            name: "{{ keycloak_pg_service_name }}"
+            state: restarted
+          when:
+            - not ansible_check_mode
+            - keycloak_pg_host not in ['127.0.0.1', 'localhost']
+            - (keycloak_pg_host ~ ':' ~ (keycloak_pg_port | string)) not in (_keycloak_pg_listen_sockets.stdout | default(''))
+            - ('0.0.0.0:' ~ (keycloak_pg_port | string)) not in (_keycloak_pg_listen_sockets.stdout | default(''))
+            - ('[::]:' ~ (keycloak_pg_port | string)) not in (_keycloak_pg_listen_sockets.stdout | default(''))
+
+        - name: Check if UFW is installed for Keycloak PostgreSQL firewall rule (Debian)
+          ansible.builtin.stat:
+            path: /usr/sbin/ufw
+          register: _keycloak_pg_ufw_bin
+          when:
+            - keycloak_configure_pg_firewall | bool
+            - ansible_facts['os_family'] == 'Debian'
+
+        - name: Allow Kubernetes pod CIDR to reach PostgreSQL port in UFW for Keycloak (Debian)
+          ansible.builtin.command:
+            cmd: >-
+              ufw allow
+              from {{ keycloak_pod_network_cidr }}
+              to any port {{ keycloak_pg_port }}
+              proto tcp
+              comment 'HomeLab Keycloak PostgreSQL'
+          register: _keycloak_pg_ufw_rule
+          changed_when: >-
+            'Rule added' in _keycloak_pg_ufw_rule.stdout
+            or 'Rules updated' in _keycloak_pg_ufw_rule.stdout
+          when:
+            - keycloak_configure_pg_firewall | bool
+            - ansible_facts['os_family'] == 'Debian'
+            - _keycloak_pg_ufw_bin.stat.exists | default(false)
+
+        - name: Gather service facts to detect firewalld for Keycloak (RedHat / SUSE)
+          ansible.builtin.service_facts:
+          when:
+            - keycloak_configure_pg_firewall | bool
+            - ansible_facts['os_family'] in ['RedHat', 'Suse']
+
+        - name: Allow Kubernetes pod CIDR to reach PostgreSQL port in firewalld for Keycloak (RedHat / SUSE)
+          when:
+            - keycloak_configure_pg_firewall | bool
+            - ansible_facts['os_family'] in ['RedHat', 'Suse']
+            - "'firewalld.service' in ansible_facts.services"
+            - ansible_facts.services['firewalld.service'].state == 'running'
+          block:
+            - name: Set firewalld rich rule for Keycloak pod access to PostgreSQL
+              ansible.builtin.set_fact:
+                _keycloak_pg_firewalld_rule: >-
+                  rule family="ipv4" source address="{{ keycloak_pod_network_cidr }}" port port="{{ keycloak_pg_port }}" protocol="tcp" accept
+
+            - name: Check whether Keycloak PostgreSQL rich rule exists in firewalld
+              ansible.builtin.command:
+                argv:
+                  - firewall-cmd
+                  - --permanent
+                  - "--query-rich-rule={{ _keycloak_pg_firewalld_rule }}"
+              register: _keycloak_pg_firewalld_query
+              changed_when: false
+              failed_when: false
+              check_mode: false
+
+            - name: Add Keycloak PostgreSQL rich rule to firewalld
+              ansible.builtin.command:
+                argv:
+                  - firewall-cmd
+                  - --permanent
+                  - "--add-rich-rule={{ _keycloak_pg_firewalld_rule }}"
+              when: _keycloak_pg_firewalld_query.rc != 0
+              changed_when: true
+              register: _keycloak_pg_firewalld_added
+
+            - name: Reload firewalld to apply Keycloak PostgreSQL rule
+              ansible.builtin.command:
+                cmd: firewall-cmd --reload
+              when: _keycloak_pg_firewalld_added is changed
+              changed_when: true
+
+        - name: Flush PostgreSQL handlers before deploying Keycloak
+          ansible.builtin.meta: flush_handlers
+
+    - name: Ensure Keycloak namespace exists
+      ansible.builtin.shell:
+        cmd: >-
+          kubectl --kubeconfig {{ keycloak_kubeconfig }} create namespace {{ keycloak_namespace }}
+          --dry-run=client -o yaml
+          | kubectl --kubeconfig {{ keycloak_kubeconfig }} apply -f -
+      when: not ansible_check_mode
+      register: _keycloak_ns_apply
+      changed_when: "'created' in _keycloak_ns_apply.stdout"
+
+    - name: Create or update Keycloak database and admin Secret
+      when: not ansible_check_mode
+      no_log: true
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json
+            import subprocess
+            import sys
+
+            kubeconfig, ns, name, db_user, db_pass, admin_user, admin_pass = sys.argv[1:8]
+            secret = {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {"name": name, "namespace": ns},
+                "type": "Opaque",
+                "stringData": {
+                    "KC_DB_USERNAME": db_user,
+                    "KC_DB_PASSWORD": db_pass,
+                    "KC_BOOTSTRAP_ADMIN_USERNAME": admin_user,
+                    "KC_BOOTSTRAP_ADMIN_PASSWORD": admin_pass,
+                },
+            }
+            out = subprocess.check_output(
+                ["kubectl", "--kubeconfig", kubeconfig, "apply", "-f", "-"],
+                input=json.dumps(secret),
+                text=True,
+            )
+            print(out.strip())
+          - "{{ keycloak_kubeconfig }}"
+          - "{{ keycloak_namespace }}"
+          - "{{ keycloak_name }}-secrets"
+          - "{{ keycloak_pg_user }}"
+          - "{{ keycloak_pg_password }}"
+          - "{{ keycloak_admin_user }}"
+          - "{{ keycloak_admin_password }}"
+      register: _keycloak_secret_apply
+      changed_when: >-
+        ('created' in _keycloak_secret_apply.stdout)
+        or ('configured' in _keycloak_secret_apply.stdout)
+
+    - name: Check if HomeLab Root CA certificate file exists for Keycloak truststore
+      ansible.builtin.stat:
+        path: "{{ keycloak_ca_cert_file }}"
+      register: _keycloak_ca_cert_stat
+
+    - name: Create or update Keycloak custom CA Secret from HomeLab Root CA
+      ansible.builtin.shell:
+        cmd: >-
+          kubectl --kubeconfig {{ keycloak_kubeconfig }}
+          -n {{ keycloak_namespace }} create secret generic {{ keycloak_ca_secret_name }}
+          --from-file=homelab-root-ca.crt={{ keycloak_ca_cert_file }}
+          --dry-run=client -o yaml
+          | kubectl --kubeconfig {{ keycloak_kubeconfig }} apply -f -
+      when:
+        - _keycloak_ca_cert_stat.stat.exists
+        - not ansible_check_mode
+      register: _keycloak_ca_secret_apply
+      changed_when: >-
+        ('created' in _keycloak_ca_secret_apply.stdout)
+        or ('configured' in _keycloak_ca_secret_apply.stdout)
+
+    - name: Ensure Keycloak manifest directory exists
+      ansible.builtin.file:
+        path: "{{ keycloak_manifest_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Render Keycloak Kubernetes manifests
+      ansible.builtin.template:
+        src: keycloak.yaml.j2
+        dest: "{{ keycloak_manifest_dir }}/{{ keycloak_name }}.yaml"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply Keycloak Kubernetes manifests
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ keycloak_kubeconfig }}
+          apply -f {{ keycloak_manifest_dir }}/{{ keycloak_name }}.yaml
+      when: not ansible_check_mode
+      register: _keycloak_manifest_apply
+      changed_when: >-
+        ('created' in _keycloak_manifest_apply.stdout)
+        or ('configured' in _keycloak_manifest_apply.stdout)
+
+    - name: Restart Keycloak deployment if Secrets changed
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ keycloak_kubeconfig }}
+          -n {{ keycloak_namespace }}
+          rollout restart deployment/{{ keycloak_name }}
+      when:
+        - not ansible_check_mode
+        - (_keycloak_secret_apply is changed) or (_keycloak_ca_secret_apply is changed)
+        - "'deployment.apps/' ~ keycloak_name ~ ' created' not in (_keycloak_manifest_apply.stdout | default(''))"
+      changed_when: true
+
+    - name: Wait for Keycloak deployment to become Ready
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ keycloak_kubeconfig }}
+          -n {{ keycloak_namespace }}
+          rollout status deployment/{{ keycloak_name }} --timeout=300s
+      when: not ansible_check_mode
+      changed_when: false
+
+    - name: Configure Keycloak HomeLab realm, Active Directory LDAP federation, and Backstage OIDC client
+      when: not ansible_check_mode
+      no_log: true
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json
+            import os
+            import ssl
+            import subprocess
+            import sys
+            import time
+            import urllib.error
+            import urllib.parse
+            import urllib.request
+
+            (
+                kubeconfig,
+                ns,
+                kc_url,
+                ca_file,
+                admin_user,
+                admin_pass,
+                realm,
+                realm_display,
+                ad_enabled_str,
+                ad_name,
+                ad_url,
+                ad_users_dn,
+                ad_bind_dn,
+                ad_bind_pass,
+                bs_enabled_str,
+                bs_client_id,
+                bs_hostname,
+                bs_client_secret,
+                bs_oidc_secret_name,
+            ) = sys.argv[1:20]
+
+            ad_enabled = ad_enabled_str.lower() == "true"
+            bs_enabled = bs_enabled_str.lower() == "true"
+
+            ctx = ssl.create_default_context()
+            if ca_file and os.path.exists(ca_file):
+                ctx.load_verify_locations(cafile=ca_file)
+
+            def req(method, path, data=None, token=None, form=False):
+                url = f"{kc_url}{path}"
+                headers = {}
+                body = None
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+                if data is not None:
+                    if form:
+                        body = urllib.parse.urlencode(data).encode()
+                        headers["Content-Type"] = "application/x-www-form-urlencoded"
+                    else:
+                        body = json.dumps(data).encode()
+                        headers["Content-Type"] = "application/json"
+                r = urllib.request.Request(url, data=body, headers=headers, method=method)
+                try:
+                    with urllib.request.urlopen(r, context=ctx, timeout=20) as resp:
+                        raw = resp.read().decode()
+                        return resp.status, (json.loads(raw) if raw else None)
+                except urllib.error.HTTPError as e:
+                    raw = e.read().decode() if e.fp else ""
+                    return e.code, raw
+
+            # Wait up to 90s for HTTPS ingress + token endpoint to come up
+            token = None
+            last_err = ""
+            for _ in range(30):
+                try:
+                    status, payload = req(
+                        "POST",
+                        "/realms/master/protocol/openid-connect/token",
+                        data={
+                            "grant_type": "password",
+                            "client_id": "admin-cli",
+                            "username": admin_user,
+                            "password": admin_pass,
+                        },
+                        form=True,
+                    )
+                    if status == 200 and isinstance(payload, dict) and payload.get("access_token"):
+                        token = payload["access_token"]
+                        break
+                    last_err = f"HTTP {status}: {payload}"
+                except Exception as exc:
+                    last_err = str(exc)
+                time.sleep(3)
+
+            if not token:
+                raise SystemExit(f"Could not obtain Keycloak admin token from {kc_url}: {last_err}")
+
+            changed = False
+
+            # 1. Ensure realm exists
+            status, realm_obj = req("GET", f"/admin/realms/{realm}", token=token)
+            if status == 404:
+                st, err = req(
+                    "POST",
+                    "/admin/realms",
+                    data={
+                        "realm": realm,
+                        "displayName": realm_display,
+                        "enabled": True,
+                        "loginWithEmailAllowed": True,
+                    },
+                    token=token,
+                )
+                if st not in (200, 201, 204):
+                    raise SystemExit(f"Failed creating realm '{realm}': HTTP {st} {err}")
+                changed = True
+                status, realm_obj = req("GET", f"/admin/realms/{realm}", token=token)
+            elif status != 200:
+                raise SystemExit(f"Failed reading realm '{realm}': HTTP {status} {realm_obj}")
+
+            realm_id = realm_obj.get("id", realm)
+
+            # 2. Ensure Active Directory LDAP User Federation when bind password is provided
+            ad_synced = False
+            if ad_enabled and ad_bind_pass:
+                st, comps = req(
+                    "GET",
+                    f"/admin/realms/{realm}/components?type=org.keycloak.storage.UserStorageProvider",
+                    token=token,
+                )
+                if st != 200:
+                    raise SystemExit(f"Failed listing UserStorageProviders: HTTP {st} {comps}")
+                existing_ad = next((c for c in (comps or []) if c.get("name") == ad_name), None)
+
+                ldap_cfg = {
+                    "enabled": ["true"],
+                    "priority": ["0"],
+                    "editMode": ["READ_ONLY"],
+                    "importEnabled": ["true"],
+                    "syncRegistrations": ["false"],
+                    "vendor": ["ad"],
+                    "usernameLDAPAttribute": ["sAMAccountName"],
+                    "rdnLDAPAttribute": ["cn"],
+                    "uuidLDAPAttribute": ["objectGUID"],
+                    "userObjectClasses": ["person, organizationalPerson, user"],
+                    "connectionUrl": [ad_url],
+                    "usersDn": [ad_users_dn],
+                    "searchScope": ["2"],
+                    "authType": ["simple"],
+                    "bindDn": [ad_bind_dn],
+                    "bindCredential": [ad_bind_pass],
+                    "useTruststoreSpi": ["always"],
+                    "connectionPooling": ["true"],
+                    "pagination": ["true"],
+                    "batchSizeForSync": ["1000"],
+                    "fullSyncPeriod": ["86400"],
+                    "changedSyncPeriod": ["3600"],
+                }
+                comp_payload = {
+                    "name": ad_name,
+                    "providerId": "ldap",
+                    "providerType": "org.keycloak.storage.UserStorageProvider",
+                    "parentId": realm_id,
+                    "config": ldap_cfg,
+                }
+                if not existing_ad:
+                    st, err = req("POST", f"/admin/realms/{realm}/components", data=comp_payload, token=token)
+                    if st not in (200, 201, 204):
+                        raise SystemExit(f"Failed creating AD LDAP component: HTTP {st} {err}")
+                    changed = True
+                    st, comps = req(
+                        "GET",
+                        f"/admin/realms/{realm}/components?type=org.keycloak.storage.UserStorageProvider",
+                        token=token,
+                    )
+                    existing_ad = next((c for c in (comps or []) if c.get("name") == ad_name), None)
+                else:
+                    comp_payload["id"] = existing_ad["id"]
+                    st, err = req(
+                        "PUT",
+                        f"/admin/realms/{realm}/components/{existing_ad['id']}",
+                        data=comp_payload,
+                        token=token,
+                    )
+                    if st not in (200, 204):
+                        raise SystemExit(f"Failed updating AD LDAP component: HTTP {st} {err}")
+
+                if existing_ad and existing_ad.get("id"):
+                    st, sync_res = req(
+                        "POST",
+                        f"/admin/realms/{realm}/user-storage/{existing_ad['id']}/sync?action=triggerFullSync",
+                        token=token,
+                    )
+                    if st == 200:
+                        ad_synced = True
+
+            # 3. Ensure Backstage confidential OIDC client & export K8s Secret for Backstage role
+            if bs_enabled:
+                st, clients = req(
+                    "GET",
+                    f"/admin/realms/{realm}/clients?clientId={urllib.parse.quote(bs_client_id)}",
+                    token=token,
+                )
+                if st != 200:
+                    raise SystemExit(f"Failed querying clients: HTTP {st} {clients}")
+                existing_client = next((c for c in (clients or []) if c.get("clientId") == bs_client_id), None)
+
+                redirect_uri = f"https://{bs_hostname}/api/auth/oidc/handler/frame"
+                web_origin = f"https://{bs_hostname}"
+                client_payload = {
+                    "clientId": bs_client_id,
+                    "name": "Backstage Developer Portal",
+                    "enabled": True,
+                    "protocol": "openid-connect",
+                    "publicClient": False,
+                    "standardFlowEnabled": True,
+                    "implicitFlowEnabled": False,
+                    "directAccessGrantsEnabled": False,
+                    "serviceAccountsEnabled": False,
+                    "redirectUris": [redirect_uri],
+                    "webOrigins": [web_origin],
+                    "rootUrl": web_origin,
+                    "baseUrl": web_origin,
+                }
+                if bs_client_secret:
+                    client_payload["secret"] = bs_client_secret
+
+                if not existing_client:
+                    st, err = req("POST", f"/admin/realms/{realm}/clients", data=client_payload, token=token)
+                    if st not in (200, 201, 204):
+                        raise SystemExit(f"Failed creating OIDC client '{bs_client_id}': HTTP {st} {err}")
+                    changed = True
+                    st, clients = req(
+                        "GET",
+                        f"/admin/realms/{realm}/clients?clientId={urllib.parse.quote(bs_client_id)}",
+                        token=token,
+                    )
+                    existing_client = next((c for c in (clients or []) if c.get("clientId") == bs_client_id), None)
+                else:
+                    need_update = (
+                        redirect_uri not in (existing_client.get("redirectUris") or [])
+                        or web_origin not in (existing_client.get("webOrigins") or [])
+                        or existing_client.get("publicClient", True) is not False
+                    )
+                    if need_update or bs_client_secret:
+                        merged = dict(existing_client)
+                        merged.update(client_payload)
+                        st, err = req(
+                            "PUT",
+                            f"/admin/realms/{realm}/clients/{existing_client['id']}",
+                            data=merged,
+                            token=token,
+                        )
+                        if st not in (200, 204):
+                            raise SystemExit(f"Failed updating OIDC client '{bs_client_id}': HTTP {st} {err}")
+                        changed = True
+
+                st, sec_obj = req(
+                    "GET",
+                    f"/admin/realms/{realm}/clients/{existing_client['id']}/client-secret",
+                    token=token,
+                )
+                if st != 200 or not isinstance(sec_obj, dict) or not sec_obj.get("value"):
+                    raise SystemExit(f"Failed fetching OIDC client secret: HTTP {st} {sec_obj}")
+
+                k8s_secret = {
+                    "apiVersion": "v1",
+                    "kind": "Secret",
+                    "metadata": {"name": bs_oidc_secret_name, "namespace": ns},
+                    "type": "Opaque",
+                    "stringData": {
+                        "OIDC_CLIENT_ID": bs_client_id,
+                        "OIDC_CLIENT_SECRET": sec_obj["value"],
+                        "OIDC_METADATA_URL": f"{kc_url}/realms/{realm}/.well-known/openid-configuration",
+                    },
+                }
+                apply_out = subprocess.check_output(
+                    ["kubectl", "--kubeconfig", kubeconfig, "apply", "-f", "-"],
+                    input=json.dumps(k8s_secret),
+                    text=True,
+                )
+                if "created" in apply_out or "configured" in apply_out:
+                    changed = True
+
+            print(f"STATUS={'CHANGED' if changed else 'UNCHANGED'} AD_SYNCED={ad_synced}")
+          - "{{ keycloak_kubeconfig }}"
+          - "{{ keycloak_namespace }}"
+          - "https://{{ keycloak_hostname }}"
+          - "{{ keycloak_ca_cert_file }}"
+          - "{{ keycloak_admin_user }}"
+          - "{{ keycloak_admin_password }}"
+          - "{{ keycloak_realm_name }}"
+          - "{{ keycloak_realm_display_name }}"
+          - "{{ keycloak_ad_ldap_enabled | string }}"
+          - "{{ keycloak_ad_ldap_name }}"
+          - "{{ keycloak_ad_ldap_url }}"
+          - "{{ keycloak_ad_users_dn }}"
+          - "{{ keycloak_ad_bind_dn }}"
+          - "{{ keycloak_ad_bind_password }}"
+          - "{{ keycloak_backstage_client_enabled | string }}"
+          - "{{ keycloak_backstage_client_id }}"
+          - "{{ keycloak_backstage_hostname }}"
+          - "{{ keycloak_backstage_client_secret }}"
+          - "{{ keycloak_backstage_oidc_secret_name }}"
+      register: _keycloak_realm_configure
+      changed_when: "'STATUS=CHANGED' in _keycloak_realm_configure.stdout"
+
+    - name: Notice when Active Directory LDAP bind password is not set in vault
+      ansible.builtin.debug:
+        msg: >-
+          Active Directory LDAP federation was skipped because 'vault_keycloak_ad_bind_password' is not set in vault/vault.yml.
+          Add 'vault_keycloak_ad_bind_password' (password for {{ keycloak_ad_bind_dn }}) and re-run to enable AD user sync.
+      when:
+        - keycloak_ad_ldap_enabled | bool
+        - (keycloak_ad_bind_password | length) == 0
+
+    - name: Report Keycloak deployment summary
+      ansible.builtin.debug:
+        msg: >-
+          Keycloak ({{ keycloak_image }}) is active in namespace '{{ keycloak_namespace }}'
+          connected to external PostgreSQL {{ keycloak_pg_host }}:{{ keycloak_pg_port }}/{{ keycloak_pg_database }}.
+          Admin Console: https://{{ keycloak_hostname }} (realm '{{ keycloak_realm_name }}').
+      when: (_keycloak_manifest_apply is changed) or (_keycloak_secret_apply is changed) or (_keycloak_realm_configure is changed)

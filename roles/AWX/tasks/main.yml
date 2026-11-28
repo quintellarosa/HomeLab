@@ -8,16 +8,18 @@
 # ---------------------------------------------------------------------------
 # 1. Verify global 'postgresql' config and running Kubernetes Master + AWX CRD
 # ---------------------------------------------------------------------------
-- name: Verify global 'postgresql' inventory variable is defined
+- name: Verify global 'postgresql.awx' inventory variable is defined
   ansible.builtin.assert:
     that:
       - postgresql is defined
       - postgresql is mapping
+      - postgresql.awx is defined
+      - postgresql.awx is mapping
       - awx_pg_host | default('') | length > 0
       - awx_pg_database | default('') | length > 0
       - awx_pg_user | default('') | length > 0
     fail_msg: >-
-      Global inventory variable 'postgresql' is missing required fields (host, port, databases.awx.name, databases.awx.user).
+      Global inventory variable 'postgresql.awx' is missing required fields (host, port, database, user).
 
 - name: Check Kubernetes master files on target host
   ansible.builtin.stat:

@@ -1,0 +1,46 @@
+---
+# Argo CD (Kubernetes-native GitOps continuous delivery)
+argocd_version: "v3.6.3"
+argocd_namespace: "argocd"
+argocd_manifest_dir: "/etc/kubernetes/argocd"
+argocd_manifest_url: "https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml"
+argocd_manifest_file: "{{ argocd_manifest_dir }}/install-{{ argocd_version }}.yaml"
+
+# Optional matching Argo CD CLI installation on the workstation
+argocd_install_cli: true
+argocd_cli_bin_path: "/usr/local/bin/argocd"
+
+# Web UI / CLI & TLS settings (follows global inventory 'network.domain')
+argocd_hostname: "argocd.{{ network.domain }}"
+argocd_gitlab_hostname: "gitlab.{{ network.domain }}"
+argocd_keycloak_hostname: "keycloak.{{ network.domain }}"
+argocd_ingress_class_name: "cilium"
+argocd_cert_manager_issuer: "homelab-ca"
+argocd_tls_secret_name: "argocd-tls-secret"
+
+# Local admin password (from vault/vault.yml -> vault_argocd_admin_password)
+argocd_admin_password: "{{ vault_argocd_admin_password | default('') }}"
+
+# HomeLab Private Root CA trust (for GitLab HTTPS repos & Keycloak OIDC)
+argocd_ca_cert_file: "/etc/kubernetes/homelab-root-ca.crt"
+argocd_trusted_tls_hosts:
+  - "{{ argocd_gitlab_hostname }}"
+  - "{{ argocd_keycloak_hostname }}"
+
+# Automatic Keycloak OIDC SSO integration (reuses HomeLab realm & AD federation when Keycloak is deployed)
+argocd_oidc_enabled: true
+argocd_oidc_keycloak_realm: "homelab"
+argocd_oidc_keycloak_admin_user: "admin"
+argocd_oidc_keycloak_admin_password: "{{ vault_keycloak_admin_password | default('') }}"
+argocd_oidc_client_id: "argocd"
+argocd_oidc_client_secret: "{{ vault_argocd_oidc_client_secret | default('') }}"
+
+# Argo CD RBAC configuration (grants role:admin to listed OIDC usernames/groups)
+argocd_rbac_default_policy: "role:readonly"
+argocd_rbac_admin_subjects:
+  - "administrator"
+  - "admin"
+
+# Kubernetes control-plane detection paths (kubeadm master)
+argocd_kubeconfig: "/etc/kubernetes/admin.conf"
+argocd_apiserver_manifest: "/etc/kubernetes/manifests/kube-apiserver.yaml"

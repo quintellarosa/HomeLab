@@ -15,12 +15,12 @@ awx_admin_user: "admin"
 awx_admin_password: "{{ vault_awx_admin_password | default('') }}"
 awx_admin_password_secret_name: "{{ awx_name }}-admin-password"
 
-# External PostgreSQL connection settings (derived from global inventory 'postgresql' object)
-awx_pg_host: "{{ postgresql.host }}"
-awx_pg_port: "{{ postgresql.port | default(5432) }}"
-awx_pg_database: "{{ postgresql.databases.awx.name | default('awx') }}"
-awx_pg_user: "{{ postgresql.databases.awx.user | default('awx') }}"
-awx_pg_sslmode: "{{ postgresql.sslmode | default('prefer') }}"
+# External PostgreSQL connection settings (derived from per-service 'postgresql.awx' in inventory.yml)
+awx_pg_host: "{{ postgresql.awx.host }}"
+awx_pg_port: "{{ postgresql.awx.port | default(5432) }}"
+awx_pg_database: "{{ postgresql.awx.database | default('awx') }}"
+awx_pg_user: "{{ postgresql.awx.user | default('awx') }}"
+awx_pg_sslmode: "{{ postgresql.awx.sslmode | default('prefer') }}"
 awx_pg_password: "{{ vault_awx_pg_password | default('') }}"
 awx_pg_secret_name: "{{ awx_name }}-postgres-configuration"
 

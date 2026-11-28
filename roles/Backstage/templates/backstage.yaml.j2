@@ -1,0 +1,254 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ backstage_name }}-app-config
+  namespace: {{ backstage_namespace }}
+data:
+  app-config-homelab.yaml: |
+    app:
+      title: {{ backstage_app_title }}
+      baseUrl: https://{{ backstage_hostname }}
+    organization:
+      name: {{ backstage_org_name }}
+{% set _signin_providers = [] %}
+{% if _backstage_oidc_active | default(false) | bool %}
+{%   set _ = _signin_providers.append('oidc') %}
+{% endif %}
+{% if _backstage_gitlab_active | default(false) | bool %}
+{%   set _ = _signin_providers.append('gitlab') %}
+{% endif %}
+{% if (backstage_allow_guest_auth | bool) or (_signin_providers | length == 0) %}
+{%   set _ = _signin_providers.append('guest') %}
+{% endif %}
+{% if _signin_providers | length == 1 %}
+    signInPage: {{ _signin_providers[0] }}
+{% else %}
+    signInPage:
+{%   for _prov in _signin_providers %}
+      - {{ _prov }}
+{%   endfor %}
+{% endif %}
+    backend:
+      baseUrl: https://{{ backstage_hostname }}
+      listen:
+        port: {{ backstage_port }}
+      cors:
+        origin: https://{{ backstage_hostname }}
+        methods: [GET, HEAD, PATCH, POST, PUT, DELETE]
+        credentials: true
+      auth:
+        keys:
+          - secret: ${BACKEND_SECRET}
+      database:
+        client: pg
+        pluginDivisionMode: schema
+        ensureExists: false
+        ensureSchemaExists: true
+        connection:
+          host: ${POSTGRES_HOST}
+          port: ${POSTGRES_PORT}
+          user: ${POSTGRES_USER}
+          password: ${POSTGRES_PASSWORD}
+          database: ${POSTGRES_DB}
+{% if backstage_pg_sslmode == 'require' %}
+          ssl:
+            rejectUnauthorized: false
+{% elif backstage_pg_sslmode in ['verify-ca', 'verify-full'] %}
+          ssl:
+            rejectUnauthorized: true
+{% endif %}
+    auth:
+      environment: production
+      session:
+        secret: ${BACKEND_SECRET}
+      providers:
+{% if _backstage_oidc_active | default(false) | bool %}
+        oidc:
+          production:
+            metadataUrl: ${OIDC_METADATA_URL}
+            clientId: ${OIDC_CLIENT_ID}
+            clientSecret: ${OIDC_CLIENT_SECRET}
+            prompt: auto
+            signIn:
+              resolvers:
+                - resolver: preferredUsernameMatchingUserEntityName
+                  dangerouslyAllowSignInWithoutUserInCatalog: true
+{% endif %}
+{% if _backstage_gitlab_active | default(false) | bool %}
+        gitlab:
+          production:
+            clientId: ${GITLAB_CLIENT_ID}
+            clientSecret: ${GITLAB_CLIENT_SECRET}
+            audience: https://{{ backstage_gitlab_hostname }}
+            signIn:
+              resolvers:
+                - resolver: usernameMatchingUserEntityName
+                  dangerouslyAllowSignInWithoutUserInCatalog: true
+{% endif %}
+{% if (backstage_allow_guest_auth | bool) or ((not (_backstage_oidc_active | default(false) | bool)) and (not (_backstage_gitlab_active | default(false) | bool))) %}
+        guest:
+          dangerouslyAllowOutsideDevelopment: true
+{% endif %}
+{% if backstage_rbac_enabled | bool %}
+    permission:
+      enabled: true
+      rbac:
+        admin:
+          users:
+{%   for _admin in backstage_rbac_admin_users %}
+            - name: {{ _admin }}
+{%   endfor %}
+          superUsers:
+{%   for _admin in backstage_rbac_admin_users %}
+            - name: {{ _admin }}
+{%   endfor %}
+        pluginsWithPermission:
+          - catalog
+          - scaffolder
+          - permission
+{% endif %}
+    integrations:
+      gitlab:
+        - host: {{ backstage_gitlab_hostname }}
+          apiBaseUrl: https://{{ backstage_gitlab_hostname }}/api/v4
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ backstage_name }}
+  namespace: {{ backstage_namespace }}
+  labels:
+    app: {{ backstage_name }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: {{ backstage_name }}
+  template:
+    metadata:
+      labels:
+        app: {{ backstage_name }}
+    spec:
+{% if backstage_rbac_enabled | bool %}
+      initContainers:
+        - name: install-rbac-plugin
+          image: {{ backstage_image }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - >-
+              cp -a /opt/app-root/src/dynamic-plugins/dist/backstage-community-plugin-rbac
+              /dynamic-plugins-root/
+          volumeMounts:
+            - name: dynamic-plugins-root
+              mountPath: /dynamic-plugins-root
+{% endif %}
+      containers:
+        - name: backstage
+          image: {{ backstage_image }}
+          imagePullPolicy: IfNotPresent
+          args:
+{% if backstage_rbac_enabled | bool %}
+            - "--config"
+            - "app-config.dynamic-plugins.yaml"
+{% endif %}
+            - "--config"
+            - "/opt/app-root/src/app-config-homelab.yaml"
+          ports:
+            - name: http
+              containerPort: {{ backstage_port }}
+          envFrom:
+            - secretRef:
+                name: {{ backstage_name }}-secrets
+{% if _backstage_ca_cert_stat.stat.exists | default(false) %}
+          env:
+            - name: NODE_EXTRA_CA_CERTS
+              value: "/etc/backstage-ca/homelab-root-ca.crt"
+{% endif %}
+          volumeMounts:
+            - name: app-config
+              mountPath: /opt/app-root/src/app-config-homelab.yaml
+              subPath: app-config-homelab.yaml
+              readOnly: true
+            - name: dynamic-plugins-root
+              mountPath: /opt/app-root/src/dynamic-plugins-root
+{% if _backstage_ca_cert_stat.stat.exists | default(false) %}
+            - name: homelab-ca
+              mountPath: /etc/backstage-ca
+              readOnly: true
+{% endif %}
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: app-config
+          configMap:
+            name: {{ backstage_name }}-app-config
+        - name: dynamic-plugins-root
+          emptyDir: {}
+{% if _backstage_ca_cert_stat.stat.exists | default(false) %}
+        - name: homelab-ca
+          secret:
+            secretName: {{ backstage_ca_secret_name }}
+{% endif %}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ backstage_name }}
+  namespace: {{ backstage_namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ backstage_name }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ backstage_name }}-ingress
+  namespace: {{ backstage_namespace }}
+  annotations:
+    cert-manager.io/cluster-issuer: {{ backstage_cert_manager_issuer }}
+spec:
+  ingressClassName: {{ backstage_ingress_class_name }}
+  tls:
+    - hosts:
+        - {{ backstage_hostname }}
+      secretName: {{ backstage_tls_secret_name }}
+  rules:
+    - host: {{ backstage_hostname }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ backstage_name }}
+                port:
+                  number: 80

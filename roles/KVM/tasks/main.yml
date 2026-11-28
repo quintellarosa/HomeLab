@@ -1,19 +1,19 @@
 ---
-- name: Ensure OS family is supported by Virtualization role
+- name: Ensure OS family is supported by KVM role
   ansible.builtin.assert:
     that:
       - ansible_facts['os_family'] in ['Debian', 'RedHat', 'Suse']
-    fail_msg: "Unsupported OS family '{{ ansible_facts['os_family'] }}' for Virtualization role (supported: Debian, RedHat, Suse)."
+    fail_msg: "Unsupported OS family '{{ ansible_facts['os_family'] }}' for KVM role (supported: Debian, RedHat, Suse)."
 
 - name: Install KVM, QEMU, libvirt, and virt-manager packages
   ansible.builtin.package:
-    name: "{{ virtualization_packages }}"
+    name: "{{ kvm_packages }}"
     state: present
 
 - name: Check libvirt daemon configuration files
   ansible.builtin.stat:
     path: "{{ item }}"
-  register: _virtualization_libvirt_confs
+  register: _kvm_libvirt_confs
   loop:
     - /etc/libvirt/libvirtd.conf
     - /etc/libvirt/virtqemud.conf
@@ -23,7 +23,7 @@
     path: "{{ item.item }}"
     regexp: '^#?\s*unix_sock_group\s*='
     line: 'unix_sock_group = "libvirt"'
-  loop: "{{ _virtualization_libvirt_confs.results }}"
+  loop: "{{ _kvm_libvirt_confs.results }}"
   loop_control:
     label: "{{ item.item }}"
   when: item.stat.exists
@@ -34,7 +34,7 @@
     path: "{{ item.item }}"
     regexp: '^#?\s*unix_sock_rw_perms\s*='
     line: 'unix_sock_rw_perms = "0770"'
-  loop: "{{ _virtualization_libvirt_confs.results }}"
+  loop: "{{ _kvm_libvirt_confs.results }}"
   loop_control:
     label: "{{ item.item }}"
   when: item.stat.exists
@@ -43,7 +43,7 @@
 - name: Check if Polkit rules directory exists
   ansible.builtin.stat:
     path: /etc/polkit-1/rules.d
-  register: _virtualization_polkit_dir
+  register: _kvm_polkit_dir
 
 - name: Allow libvirt group members passwordless access via Polkit
   ansible.builtin.copy:
@@ -58,14 +58,14 @@
               return polkit.Result.YES;
           }
       });
-  when: _virtualization_polkit_dir.stat.exists
+  when: _kvm_polkit_dir.stat.exists
 
 - name: Gather systemd service facts for libvirt
   ansible.builtin.service_facts:
 
 - name: Determine whether modular libvirt sockets are active
   ansible.builtin.set_fact:
-    _virtualization_use_modular_daemons: >-
+    _kvm_use_modular_daemons: >-
       {{
         ('virtqemud.socket' in ansible_facts.services and ansible_facts.services['virtqemud.socket'].status | default('') == 'enabled')
         or ('libvirtd.service' not in ansible_facts.services)
@@ -77,7 +77,7 @@
     enabled: true
     state: started
   when:
-    - not (_virtualization_use_modular_daemons | bool)
+    - not (_kvm_use_modular_daemons | bool)
     - "'libvirtd.service' in ansible_facts.services"
 
 - name: Enable and start modular libvirt sockets
@@ -90,136 +90,136 @@
     - virtnetworkd.socket
     - virtstoraged.socket
   when:
-    - _virtualization_use_modular_daemons | bool
+    - _kvm_use_modular_daemons | bool
     - item in ansible_facts.services
 
 - name: Read existing system groups
   ansible.builtin.getent:
     database: group
 
-- name: Add target user to virtualization groups
+- name: Add target user to KVM and libvirt groups
   ansible.builtin.user:
-    name: "{{ virtualization_user }}"
-    groups: "{{ virtualization_user_groups | select('in', ansible_facts.getent_group) | list }}"
+    name: "{{ kvm_user }}"
+    groups: "{{ kvm_user_groups | select('in', ansible_facts.getent_group) | list }}"
     append: true
-  register: _virtualization_user_groups
+  register: _kvm_user_groups
   when:
-    - virtualization_user | default('') | length > 0
-    - (virtualization_user_groups | select('in', ansible_facts.getent_group) | list) | length > 0
+    - kvm_user | default('') | length > 0
+    - (kvm_user_groups | select('in', ansible_facts.getent_group) | list) | length > 0
 
 - name: Remind user to re-login for new libvirt/kvm group membership
   ansible.builtin.debug:
     msg: >-
-      Added '{{ virtualization_user }}' to virtualization groups ({{ virtualization_user_groups | join(', ') }}).
+      Added '{{ kvm_user }}' to KVM/libvirt groups ({{ kvm_user_groups | join(', ') }}).
       Log out and log back in (or reboot) for Virtual Machine Manager to connect without sudo.
-  when: _virtualization_user_groups is changed
+  when: _kvm_user_groups is changed
 
 - name: Configure default libvirt NAT network
-  when: virtualization_enable_default_network | bool
+  when: kvm_enable_default_network | bool
   block:
     - name: Inspect default libvirt network
       ansible.builtin.command:
-        cmd: "virsh net-info {{ virtualization_default_network_name }}"
-      register: _virtualization_default_net
+        cmd: "virsh net-info {{ kvm_default_network_name }}"
+      register: _kvm_default_net
       changed_when: false
       failed_when: false
       check_mode: false
 
     - name: Dump existing default libvirt network XML
       ansible.builtin.command:
-        cmd: "virsh net-dumpxml {{ virtualization_default_network_name }}"
-      register: _virtualization_default_net_xml
+        cmd: "virsh net-dumpxml {{ kvm_default_network_name }}"
+      register: _kvm_default_net_xml
       changed_when: false
       failed_when: false
       check_mode: false
-      when: _virtualization_default_net.rc == 0
+      when: _kvm_default_net.rc == 0
 
     - name: Parse existing libvirt network bridge, gateway, and netmask
       ansible.builtin.set_fact:
-        _virtualization_cur_bridge: >-
+        _kvm_cur_bridge: >-
           {{
-            (_virtualization_default_net_xml.stdout | default('') | regex_search("<bridge[^>]*name='([^']+)'", '\1') | default([''], true) | first)
+            (_kvm_default_net_xml.stdout | default('') | regex_search("<bridge[^>]*name='([^']+)'", '\1') | default([''], true) | first)
           }}
-        _virtualization_cur_gateway: >-
+        _kvm_cur_gateway: >-
           {{
-            (_virtualization_default_net_xml.stdout | default('') | regex_search("<ip[^>]*address='([^']+)'", '\1') | default([''], true) | first)
+            (_kvm_default_net_xml.stdout | default('') | regex_search("<ip[^>]*address='([^']+)'", '\1') | default([''], true) | first)
           }}
-        _virtualization_cur_netmask: >-
+        _kvm_cur_netmask: >-
           {{
-            (_virtualization_default_net_xml.stdout | default('') | regex_search("<ip[^>]*netmask='([^']+)'", '\1') | default([''], true) | first)
+            (_kvm_default_net_xml.stdout | default('') | regex_search("<ip[^>]*netmask='([^']+)'", '\1') | default([''], true) | first)
           }}
 
     - name: Determine whether default libvirt network must be (re)defined to match inventory 'network'
       ansible.builtin.set_fact:
-        _virtualization_redefine_default_net: >-
+        _kvm_redefine_default_net: >-
           {{
-            (_virtualization_default_net.rc != 0)
-            or (_virtualization_cur_bridge != virtualization_default_network_bridge)
-            or (_virtualization_cur_gateway != virtualization_default_network_gateway)
-            or (_virtualization_cur_netmask != virtualization_default_network_netmask)
+            (_kvm_default_net.rc != 0)
+            or (_kvm_cur_bridge != kvm_default_network_bridge)
+            or (_kvm_cur_gateway != kvm_default_network_gateway)
+            or (_kvm_cur_netmask != kvm_default_network_netmask)
           }}
 
     - name: Define or update default libvirt network from inventory 'network'
-      when: _virtualization_redefine_default_net | bool
+      when: _kvm_redefine_default_net | bool
       block:
         - name: Render default libvirt network XML definition
           ansible.builtin.template:
             src: default-network.xml.j2
-            dest: "/etc/libvirt/homelab-{{ virtualization_default_network_name }}-network.xml"
+            dest: "/etc/libvirt/homelab-{{ kvm_default_network_name }}-network.xml"
             owner: root
             group: root
             mode: "0644"
 
         - name: Stop active default libvirt network before redefining bridge/subnet
           ansible.builtin.command:
-            cmd: "virsh net-destroy {{ virtualization_default_network_name }}"
+            cmd: "virsh net-destroy {{ kvm_default_network_name }}"
           when:
-            - _virtualization_default_net.rc == 0
-            - _virtualization_default_net.stdout is regex('Active:\s+yes')
+            - _kvm_default_net.rc == 0
+            - _kvm_default_net.stdout is regex('Active:\s+yes')
           changed_when: true
 
         - name: Define default libvirt network from rendered XML
           ansible.builtin.command:
-            cmd: "virsh net-define /etc/libvirt/homelab-{{ virtualization_default_network_name }}-network.xml"
+            cmd: "virsh net-define /etc/libvirt/homelab-{{ kvm_default_network_name }}-network.xml"
           changed_when: true
 
         - name: Start newly defined default libvirt network
           ansible.builtin.command:
-            cmd: "virsh net-start {{ virtualization_default_network_name }}"
+            cmd: "virsh net-start {{ kvm_default_network_name }}"
           changed_when: true
 
         - name: Enable autostart on newly defined default libvirt network
           ansible.builtin.command:
-            cmd: "virsh net-autostart {{ virtualization_default_network_name }}"
+            cmd: "virsh net-autostart {{ kvm_default_network_name }}"
           changed_when: true
 
     - name: Ensure existing default libvirt network is active and matches DHCP policy
-      when: not (_virtualization_redefine_default_net | bool)
+      when: not (_kvm_redefine_default_net | bool)
       block:
         - name: Start default libvirt network
           ansible.builtin.command:
-            cmd: "virsh net-start {{ virtualization_default_network_name }}"
+            cmd: "virsh net-start {{ kvm_default_network_name }}"
           when:
-            - "'Active:' in _virtualization_default_net.stdout"
-            - _virtualization_default_net.stdout is regex('Active:\s+no')
+            - "'Active:' in _kvm_default_net.stdout"
+            - _kvm_default_net.stdout is regex('Active:\s+no')
           changed_when: true
 
         - name: Enable autostart on default libvirt network
           ansible.builtin.command:
-            cmd: "virsh net-autostart {{ virtualization_default_network_name }}"
+            cmd: "virsh net-autostart {{ kvm_default_network_name }}"
           when:
-            - "'Autostart:' in _virtualization_default_net.stdout"
-            - _virtualization_default_net.stdout is regex('Autostart:\s+no')
+            - "'Autostart:' in _kvm_default_net.stdout"
+            - _kvm_default_net.stdout is regex('Autostart:\s+no')
           changed_when: true
 
         - name: Disable libvirt DHCP on default network when managed externally
-          when: not (virtualization_default_network_dhcp | bool)
+          when: not (kvm_default_network_dhcp | bool)
           block:
             - name: Extract configured DHCP ranges from default libvirt network XML
               ansible.builtin.set_fact:
-                _virtualization_default_dhcp_ranges: >-
+                _kvm_default_dhcp_ranges: >-
                   {{
-                    _virtualization_default_net_xml.stdout
+                    _kvm_default_net_xml.stdout
                     | default('')
                     | regex_findall('<range\s+[^>]+/>')
                   }}
@@ -229,45 +229,45 @@
                 argv:
                   - virsh
                   - net-update
-                  - "{{ virtualization_default_network_name }}"
+                  - "{{ kvm_default_network_name }}"
                   - delete
                   - ip-dhcp-range
                   - "{{ item }}"
                   - --live
                   - --config
-              loop: "{{ _virtualization_default_dhcp_ranges }}"
+              loop: "{{ _kvm_default_dhcp_ranges }}"
               changed_when: true
 
         - name: Ensure libvirt DHCP range matches inventory when libvirt DHCP is enabled
           when:
-            - virtualization_default_network_dhcp | bool
-            - (virtualization_default_network_dhcp_start | length) > 0
-            - (virtualization_default_network_dhcp_end | length) > 0
-            - ("start='" ~ virtualization_default_network_dhcp_start ~ "' end='" ~ virtualization_default_network_dhcp_end ~ "'") not in (_virtualization_default_net_xml.stdout | default(''))
+            - kvm_default_network_dhcp | bool
+            - (kvm_default_network_dhcp_start | length) > 0
+            - (kvm_default_network_dhcp_end | length) > 0
+            - ("start='" ~ kvm_default_network_dhcp_start ~ "' end='" ~ kvm_default_network_dhcp_end ~ "'") not in (_kvm_default_net_xml.stdout | default(''))
           ansible.builtin.command:
             argv:
               - virsh
               - net-update
-              - "{{ virtualization_default_network_name }}"
+              - "{{ kvm_default_network_name }}"
               - add
               - ip-dhcp-range
-              - "<range start='{{ virtualization_default_network_dhcp_start }}' end='{{ virtualization_default_network_dhcp_end }}'/>"
+              - "<range start='{{ kvm_default_network_dhcp_start }}' end='{{ kvm_default_network_dhcp_end }}'/>"
               - --live
               - --config
           changed_when: true
 
 - name: Configure PCI-Express passthrough (IOMMU and VFIO)
   ansible.builtin.include_tasks: pcie_passthrough.yml
-  when: virtualization_enable_pcie_passthrough | bool
+  when: kvm_enable_pcie_passthrough | bool
 
 - name: Check if /dev/kvm is present
   ansible.builtin.stat:
     path: /dev/kvm
-  register: _virtualization_kvm_dev
+  register: _kvm_dev
 
 - name: Warn if hardware KVM acceleration is unavailable
   ansible.builtin.debug:
     msg: >-
-      /dev/kvm was not detected. Virtualization packages are installed, but hardware acceleration
+      /dev/kvm was not detected. KVM packages are installed, but hardware acceleration
       requires enabling Intel VT-x / AMD-V in BIOS/UEFI (or nested virtualization if inside a VM).
-  when: not _virtualization_kvm_dev.stat.exists
+  when: not _kvm_dev.stat.exists

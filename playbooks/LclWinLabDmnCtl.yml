@@ -8,9 +8,9 @@
     - NetworkValidation
 
 # Configure Windows Server 2025 Domain Controller core services (AD DS -> DNS -> DHCP)
-# Run with: ansible-playbook playbooks/DmnCtl.yml --ask-vault-pass
+# Run with: ansible-playbook playbooks/LclWinLabDmnCtl.yml --ask-vault-pass
 - name: Configure Domain Controller (AD DS, DNS, and DHCP)
-  hosts: DmnCtl
+  hosts: DomainControllers
   gather_facts: true
   vars_files:
     - ../vault/vault.yml

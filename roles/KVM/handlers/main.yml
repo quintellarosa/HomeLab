@@ -1,7 +1,7 @@
 ---
 - name: Restart libvirt
   ansible.builtin.systemd_service:
-    name: "{{ 'virtqemud.service' if (_virtualization_use_modular_daemons | default(false) | bool) else 'libvirtd.service' }}"
+    name: "{{ 'virtqemud.service' if (_kvm_use_modular_daemons | default(false) | bool) else 'libvirtd.service' }}"
     state: restarted
 
 - name: Update GRUB configuration (Debian)
@@ -13,21 +13,37 @@
 
 - name: Update GRUB configuration (RedHat / SUSE)
   ansible.builtin.command:
-    cmd: "grub2-mkconfig -o {{ _virtualization_grub2_cfg | default('/boot/grub2/grub.cfg') }}"
+    cmd: "grub2-mkconfig -o {{ _kvm_grub2_cfg | default('/boot/grub2/grub.cfg') }}"
   when: ansible_facts['os_family'] in ['RedHat', 'Suse']
   changed_when: true
   listen: Update GRUB configuration
 
-- name: Regenerate initramfs (dracut)
+- name: Regenerate initramfs (Debian update-initramfs)
   ansible.builtin.command:
-    cmd: dracut --regenerate-all --force
-  when: _virtualization_dracut_bin.stat.exists | default(false)
+    cmd: update-initramfs -u -k all
+  when: ansible_facts['os_family'] == 'Debian'
   changed_when: true
   listen: Regenerate initramfs
 
-- name: Regenerate initramfs (initramfs-tools)
-  ansible.builtin.command:
-    cmd: update-initramfs -u -k all
-  when: not (_virtualization_dracut_bin.stat.exists | default(false))
+- name: Regenerate initramfs (RedHat / SUSE dracut)
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      rebuilt=0
+      for vmlinuz in /boot/vmlinuz-*; do
+        [ -f "$vmlinuz" ] || continue
+        kver="${vmlinuz#/boot/vmlinuz-}"
+        case "$kver" in *rescue*) continue ;; esac
+        if [ -d "/lib/modules/$kver" ]; then
+          dracut --force --kver "$kver"
+          rebuilt=1
+        fi
+      done
+      if [ "$rebuilt" -eq 0 ]; then
+        dracut --force --kver "$(uname -r)"
+      fi
+  when:
+    - ansible_facts['os_family'] in ['RedHat', 'Suse']
+    - _kvm_dracut_bin.stat.exists | default(false)
   changed_when: true
   listen: Regenerate initramfs

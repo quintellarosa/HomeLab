@@ -10,3 +10,26 @@ vault_win_ad_safe_mode_password: "CHANGE_ME_StrongDsrmPassword!2026"
 # AWX (do NOT include ', ", or \ in vault_awx_pg_password)
 vault_awx_pg_password: "CHANGE_ME_StrongAwxDbPass2026"
 vault_awx_admin_password: "CHANGE_ME_StrongAwxAdmin2026"
+
+# GitLab CE Omnibus
+vault_gitlab_pg_password: "CHANGE_ME_StrongGitLabDbPass2026"
+vault_gitlab_root_password: "CHANGE_ME_StrongGitLabRootPass2026"
+
+# Keycloak (OIDC + Active Directory Federation)
+vault_keycloak_pg_password: "CHANGE_ME_StrongKeycloakDbPass2026"
+vault_keycloak_admin_password: "CHANGE_ME_StrongKeycloakAdmin2026"
+# Optional: Active Directory bind password for LDAP federation (e.g. Administrator@quintellarosa.home)
+vault_keycloak_ad_bind_password: "CHANGE_ME_AdAdministratorPass2026"
+
+# Backstage.io (RHDH Community)
+vault_backstage_pg_password: "CHANGE_ME_StrongBackstageDbPass2026"
+# Optional: leave unset to auto-generate / auto-sync from GitLab & Keycloak
+# vault_backstage_backend_secret: "CHANGE_ME_32CharRandomBackendSecret2026"
+# vault_backstage_oidc_client_secret: "CHANGE_ME_BackstageOidcClientSecret2026"
+# vault_backstage_gitlab_client_id: "CHANGE_ME_GitLabOAuthAppId"
+# vault_backstage_gitlab_client_secret: "CHANGE_ME_GitLabOAuthAppSecret"
+
+# Argo CD (Kubernetes-native GitOps, no external PostgreSQL required)
+vault_argocd_admin_password: "CHANGE_ME_StrongArgoCdAdmin2026"
+# Optional: leave unset to auto-provision and sync from Keycloak
+# vault_argocd_oidc_client_secret: "CHANGE_ME_ArgoCdOidcClientSecret2026"

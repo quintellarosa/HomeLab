@@ -1,0 +1,121 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ keycloak_name }}
+  namespace: {{ keycloak_namespace }}
+  labels:
+    app: {{ keycloak_name }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: {{ keycloak_name }}
+  template:
+    metadata:
+      labels:
+        app: {{ keycloak_name }}
+    spec:
+      containers:
+        - name: keycloak
+          image: {{ keycloak_image }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - "start"
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: management
+              containerPort: 9000
+          envFrom:
+            - secretRef:
+                name: {{ keycloak_name }}-secrets
+          env:
+            - name: KC_DB
+              value: "postgres"
+            - name: KC_DB_URL
+              value: "jdbc:postgresql://{{ keycloak_pg_host }}:{{ keycloak_pg_port }}/{{ keycloak_pg_database }}?sslmode={{ keycloak_pg_sslmode }}"
+            - name: KC_HOSTNAME
+              value: "https://{{ keycloak_hostname }}"
+            - name: KC_PROXY_HEADERS
+              value: "xforwarded"
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+{% if _keycloak_ca_cert_stat.stat.exists | default(false) %}
+            - name: KC_TRUSTSTORE_PATHS
+              value: "/etc/keycloak-ca/homelab-root-ca.crt"
+          volumeMounts:
+            - name: homelab-ca
+              mountPath: /etc/keycloak-ca
+              readOnly: true
+{% endif %}
+          startupProbe:
+            httpGet:
+              path: /health/started
+              port: management
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: management
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: management
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+{% if _keycloak_ca_cert_stat.stat.exists | default(false) %}
+      volumes:
+        - name: homelab-ca
+          secret:
+            secretName: {{ keycloak_ca_secret_name }}
+{% endif %}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ keycloak_name }}
+  namespace: {{ keycloak_namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ keycloak_name }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ keycloak_name }}-ingress
+  namespace: {{ keycloak_namespace }}
+  annotations:
+    cert-manager.io/cluster-issuer: {{ keycloak_cert_manager_issuer }}
+spec:
+  ingressClassName: {{ keycloak_ingress_class_name }}
+  tls:
+    - hosts:
+        - {{ keycloak_hostname }}
+      secretName: {{ keycloak_tls_secret_name }}
+  rules:
+    - host: {{ keycloak_hostname }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ keycloak_name }}
+                port:
+                  number: 80

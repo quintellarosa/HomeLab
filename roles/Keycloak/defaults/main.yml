@@ -1,0 +1,59 @@
+---
+# Keycloak identity & access management (OIDC + Active Directory Federation)
+keycloak_name: "keycloak"
+keycloak_namespace: "keycloak"
+keycloak_image: "quay.io/keycloak/keycloak:26.8.2"
+keycloak_manifest_dir: "/etc/kubernetes/keycloak"
+
+# Web UI & TLS settings (follows global inventory 'network.domain')
+keycloak_hostname: "keycloak.{{ network.domain }}"
+keycloak_ingress_class_name: "cilium"
+keycloak_cert_manager_issuer: "homelab-ca"
+keycloak_tls_secret_name: "{{ keycloak_name }}-tls-secret"
+
+# Bootstrap Keycloak admin credentials (password from vault/vault.yml)
+keycloak_admin_user: "admin"
+keycloak_admin_password: "{{ vault_keycloak_admin_password | default('') }}"
+
+# External PostgreSQL connection settings (derived from per-service 'postgresql.keycloak' in inventory.yml)
+keycloak_pg_host: "{{ postgresql.keycloak.host }}"
+keycloak_pg_port: "{{ postgresql.keycloak.port | default(5432) }}"
+keycloak_pg_database: "{{ postgresql.keycloak.database | default('keycloak') }}"
+keycloak_pg_user: "{{ postgresql.keycloak.user | default('keycloak') }}"
+keycloak_pg_sslmode: "{{ postgresql.keycloak.sslmode | default('prefer') }}"
+keycloak_pg_password: "{{ vault_keycloak_pg_password | default('') }}"
+
+# Local PostgreSQL automation (only runs when postgresql.keycloak.host points to this host; leaves PostgreSQL role untouched)
+keycloak_manage_local_postgres_db: true
+keycloak_pod_network_cidr: "{{ kubernetes_pod_network_cidr | default('10.244.0.0/16') }}"
+keycloak_pg_hba_auth_method: "scram-sha-256"
+keycloak_pg_service_name: "postgresql"
+keycloak_configure_pg_firewall: true
+
+# HomeLab Private Root CA trust inside Keycloak (KC_TRUSTSTORE_PATHS)
+keycloak_ca_cert_file: "/etc/kubernetes/homelab-root-ca.crt"
+keycloak_ca_secret_name: "{{ keycloak_name }}-custom-cacert"
+
+# HomeLab Realm settings
+keycloak_realm_name: "homelab"
+keycloak_realm_display_name: "Quintella Rosa HomeLab"
+
+# Windows Server Active Directory LDAP Federation (targets Domain Controller at network.dns.primary)
+keycloak_ad_ldap_enabled: true
+keycloak_ad_ldap_name: "homelab-active-directory"
+keycloak_ad_ldap_url: "ldap://{{ network.dns.primary }}:389"
+keycloak_ad_base_dn: "{{ 'DC=' ~ (network.domain.split('.') | join(',DC=')) }}"
+keycloak_ad_users_dn: "{{ keycloak_ad_base_dn }}"
+keycloak_ad_bind_dn: "Administrator@{{ network.domain }}"
+keycloak_ad_bind_password: "{{ vault_keycloak_ad_bind_password | default('') }}"
+
+# Auto-provision confidential OIDC client for Backstage inside the HomeLab realm
+keycloak_backstage_client_enabled: true
+keycloak_backstage_client_id: "backstage"
+keycloak_backstage_hostname: "backstage.{{ network.domain }}"
+keycloak_backstage_client_secret: "{{ vault_backstage_oidc_client_secret | default('') }}"
+keycloak_backstage_oidc_secret_name: "keycloak-backstage-oidc"
+
+# Kubernetes control-plane detection paths (kubeadm master)
+keycloak_kubeconfig: "/etc/kubernetes/admin.conf"
+keycloak_apiserver_manifest: "/etc/kubernetes/manifests/kube-apiserver.yaml"

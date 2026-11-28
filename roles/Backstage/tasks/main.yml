@@ -1,0 +1,567 @@
+---
+- name: Ensure OS family is supported by Backstage role
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ['Debian', 'RedHat', 'Suse']
+    fail_msg: "Unsupported OS family '{{ ansible_facts['os_family'] }}' for Backstage role (supported: Debian, RedHat, Suse)."
+
+# ---------------------------------------------------------------------------
+# 1. Verify per-service 'postgresql.backstage' config and running K8s Master
+# ---------------------------------------------------------------------------
+- name: Verify global 'postgresql.backstage' inventory variable is defined
+  ansible.builtin.assert:
+    that:
+      - postgresql is defined
+      - postgresql is mapping
+      - postgresql.backstage is defined
+      - postgresql.backstage is mapping
+      - backstage_pg_host | default('') | length > 0
+      - backstage_pg_database | default('') | length > 0
+      - backstage_pg_user | default('') | length > 0
+    fail_msg: >-
+      Global inventory variable 'postgresql.backstage' is missing required fields (host, port, database, user).
+
+- name: Check Kubernetes master files on target host
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ backstage_kubeconfig }}"
+    - "{{ backstage_apiserver_manifest }}"
+  register: _backstage_master_files
+
+- name: Check if Kubernetes Master is running on this host
+  ansible.builtin.command:
+    cmd: >-
+      kubectl --kubeconfig {{ backstage_kubeconfig }}
+      get nodes -l node-role.kubernetes.io/control-plane
+      --no-headers
+  register: _backstage_master_running_cmd
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - _backstage_master_files.results[0].stat.exists
+    - _backstage_master_files.results[1].stat.exists
+
+- name: Record whether target host has a running Kubernetes Master
+  ansible.builtin.set_fact:
+    _backstage_has_running_master: >-
+      {{
+        (_backstage_master_files.results[0].stat.exists | default(false))
+        and (_backstage_master_files.results[1].stat.exists | default(false))
+        and (_backstage_master_running_cmd.rc | default(1) == 0)
+        and ((_backstage_master_running_cmd.stdout | default('') | trim | length) > 0)
+      }}
+
+- name: Skip Backstage role when target host does not have a running Kubernetes Master
+  ansible.builtin.debug:
+    msg: >-
+      Skipping Backstage role: no running Kubernetes Master (control plane) was detected on this host.
+  when: not (_backstage_has_running_master | bool)
+
+# ---------------------------------------------------------------------------
+# 2. Provision external PostgreSQL DB/access and deploy Backstage.io
+# ---------------------------------------------------------------------------
+- name: Deploy Backstage connected to external PostgreSQL
+  when: _backstage_has_running_master | bool
+  block:
+    - name: Verify Backstage PostgreSQL password is provided via Ansible Vault
+      ansible.builtin.assert:
+        that:
+          - (backstage_pg_password | length) >= 8
+        fail_msg: >-
+          Missing or too short Backstage DB password ('backstage_pg_password').
+          Edit the encrypted vault file 'vault/vault.yml' (ansible-vault edit vault/vault.yml) defining
+          'vault_backstage_pg_password' (>= 8 chars), then run with '--ask-vault-pass'.
+
+    - name: Check if local PostgreSQL server (psql) is installed
+      ansible.builtin.stat:
+        path: /usr/bin/psql
+      register: _backstage_local_psql_bin
+
+    - name: Ensure Backstage role and database exist on local external PostgreSQL
+      when:
+        - backstage_manage_local_postgres_db | bool
+        - _backstage_local_psql_bin.stat.exists
+        - backstage_pg_host in (ansible_facts['all_ipv4_addresses'] | default([]) + ['127.0.0.1', 'localhost'])
+        - not ansible_check_mode
+      no_log: true
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import subprocess
+            import sys
+
+            db_user, db_pass, db_name = sys.argv[1:4]
+            changed = False
+
+            def run_psql(sql, dbname="postgres", vars_dict=None):
+                cmd = ["/usr/sbin/runuser", "-u", "postgres", "--", "psql", "-v", "ON_ERROR_STOP=1", "-tA", "-d", dbname]
+                for k, v in (vars_dict or {}).items():
+                    cmd += ["-v", f"{k}={v}"]
+                cmd += ["-f", "-"]
+                return subprocess.check_output(cmd, input=sql + "\n", text=True).strip()
+
+            role_exists = run_psql("SELECT 1 FROM pg_roles WHERE rolname = :'u';", vars_dict={"u": db_user})
+            if role_exists != "1":
+                run_psql("CREATE ROLE :\"u\" LOGIN PASSWORD :'p';", vars_dict={"u": db_user, "p": db_pass})
+                changed = True
+            else:
+                run_psql("ALTER ROLE :\"u\" WITH LOGIN PASSWORD :'p';", vars_dict={"u": db_user, "p": db_pass})
+
+            db_exists = run_psql("SELECT 1 FROM pg_database WHERE datname = :'d';", vars_dict={"d": db_name})
+            if db_exists != "1":
+                run_psql("CREATE DATABASE :\"d\" OWNER :\"u\" ENCODING 'UTF8';", vars_dict={"d": db_name, "u": db_user})
+                changed = True
+
+            # Owning the database grants CREATE SCHEMA (required by Backstage pluginDivisionMode: schema)
+            run_psql("GRANT ALL PRIVILEGES ON DATABASE :\"d\" TO :\"u\";", vars_dict={"d": db_name, "u": db_user})
+            run_psql("GRANT ALL ON SCHEMA public TO :\"u\";", dbname=db_name, vars_dict={"u": db_user})
+
+            print("CHANGED" if changed else "UNCHANGED")
+          - "{{ backstage_pg_user }}"
+          - "{{ backstage_pg_password }}"
+          - "{{ backstage_pg_database }}"
+      register: _backstage_pg_provision
+      changed_when: "'CHANGED' in _backstage_pg_provision.stdout"
+
+    - name: Allow Kubernetes pod network to reach local PostgreSQL for Backstage
+      when:
+        - backstage_manage_local_postgres_db | bool
+        - _backstage_local_psql_bin.stat.exists
+        - backstage_pg_host in (ansible_facts['all_ipv4_addresses'] | default([]) + ['127.0.0.1', 'localhost'])
+      block:
+        - name: Query active PostgreSQL hba_file path
+          ansible.builtin.command:
+            argv:
+              - /usr/sbin/runuser
+              - -u
+              - postgres
+              - --
+              - psql
+              - -tA
+              - -c
+              - "SHOW hba_file;"
+          register: _backstage_pg_hba_file_cmd
+          changed_when: false
+          check_mode: false
+
+        - name: Allow Backstage pods ({{ backstage_pod_network_cidr }}) in PostgreSQL pg_hba.conf
+          ansible.builtin.blockinfile:
+            path: "{{ _backstage_pg_hba_file_cmd.stdout | trim }}"
+            marker: "# {mark} ANSIBLE MANAGED BLOCK - HomeLab Backstage PostgreSQL access"
+            block: |
+              host    {{ backstage_pg_database }}    {{ backstage_pg_user }}    {{ backstage_pod_network_cidr }}    {{ backstage_pg_hba_auth_method }}
+          when: (_backstage_pg_hba_file_cmd.stdout | trim | length) > 0
+          notify: Reload PostgreSQL configuration for Backstage
+
+        - name: Check if local PostgreSQL is listening on {{ backstage_pg_host }}:{{ backstage_pg_port }}
+          ansible.builtin.command:
+            cmd: "ss -tlnH sport = :{{ backstage_pg_port }}"
+          register: _backstage_pg_listen_sockets
+          changed_when: false
+          failed_when: false
+          check_mode: false
+
+        - name: Restart local PostgreSQL if it is not yet listening on {{ backstage_pg_host }}:{{ backstage_pg_port }}
+          ansible.builtin.service:
+            name: "{{ backstage_pg_service_name }}"
+            state: restarted
+          when:
+            - not ansible_check_mode
+            - backstage_pg_host not in ['127.0.0.1', 'localhost']
+            - (backstage_pg_host ~ ':' ~ (backstage_pg_port | string)) not in (_backstage_pg_listen_sockets.stdout | default(''))
+            - ('0.0.0.0:' ~ (backstage_pg_port | string)) not in (_backstage_pg_listen_sockets.stdout | default(''))
+            - ('[::]:' ~ (backstage_pg_port | string)) not in (_backstage_pg_listen_sockets.stdout | default(''))
+
+        - name: Check if UFW is installed for Backstage PostgreSQL firewall rule (Debian)
+          ansible.builtin.stat:
+            path: /usr/sbin/ufw
+          register: _backstage_pg_ufw_bin
+          when:
+            - backstage_configure_pg_firewall | bool
+            - ansible_facts['os_family'] == 'Debian'
+
+        - name: Allow Kubernetes pod CIDR to reach PostgreSQL port in UFW (Debian)
+          ansible.builtin.command:
+            cmd: >-
+              ufw allow
+              from {{ backstage_pod_network_cidr }}
+              to any port {{ backstage_pg_port }}
+              proto tcp
+              comment 'HomeLab Backstage PostgreSQL'
+          register: _backstage_pg_ufw_rule
+          changed_when: >-
+            'Rule added' in _backstage_pg_ufw_rule.stdout
+            or 'Rules updated' in _backstage_pg_ufw_rule.stdout
+          when:
+            - backstage_configure_pg_firewall | bool
+            - ansible_facts['os_family'] == 'Debian'
+            - _backstage_pg_ufw_bin.stat.exists | default(false)
+
+        - name: Gather service facts to detect firewalld (RedHat / SUSE)
+          ansible.builtin.service_facts:
+          when:
+            - backstage_configure_pg_firewall | bool
+            - ansible_facts['os_family'] in ['RedHat', 'Suse']
+
+        - name: Allow Kubernetes pod CIDR to reach PostgreSQL port in firewalld (RedHat / SUSE)
+          when:
+            - backstage_configure_pg_firewall | bool
+            - ansible_facts['os_family'] in ['RedHat', 'Suse']
+            - "'firewalld.service' in ansible_facts.services"
+            - ansible_facts.services['firewalld.service'].state == 'running'
+          block:
+            - name: Set firewalld rich rule for Backstage pod access to PostgreSQL
+              ansible.builtin.set_fact:
+                _backstage_pg_firewalld_rule: >-
+                  rule family="ipv4" source address="{{ backstage_pod_network_cidr }}" port port="{{ backstage_pg_port }}" protocol="tcp" accept
+
+            - name: Check whether Backstage PostgreSQL rich rule exists in firewalld
+              ansible.builtin.command:
+                argv:
+                  - firewall-cmd
+                  - --permanent
+                  - "--query-rich-rule={{ _backstage_pg_firewalld_rule }}"
+              register: _backstage_pg_firewalld_query
+              changed_when: false
+              failed_when: false
+              check_mode: false
+
+            - name: Add Backstage PostgreSQL rich rule to firewalld
+              ansible.builtin.command:
+                argv:
+                  - firewall-cmd
+                  - --permanent
+                  - "--add-rich-rule={{ _backstage_pg_firewalld_rule }}"
+              when: _backstage_pg_firewalld_query.rc != 0
+              changed_when: true
+              register: _backstage_pg_firewalld_added
+
+            - name: Reload firewalld to apply Backstage PostgreSQL rule
+              ansible.builtin.command:
+                cmd: firewall-cmd --reload
+              when: _backstage_pg_firewalld_added is changed
+              changed_when: true
+
+        - name: Flush PostgreSQL handlers before deploying Backstage
+          ansible.builtin.meta: flush_handlers
+
+    - name: Ensure Backstage namespace exists
+      ansible.builtin.shell:
+        cmd: >-
+          kubectl --kubeconfig {{ backstage_kubeconfig }} create namespace {{ backstage_namespace }}
+          --dry-run=client -o yaml
+          | kubectl --kubeconfig {{ backstage_kubeconfig }} apply -f -
+      when: not ansible_check_mode
+      register: _backstage_ns_apply
+      changed_when: "'created' in _backstage_ns_apply.stdout"
+
+    - name: Create or update Backstage database, OIDC, GitLab OAuth, and backend Secret
+      when: not ansible_check_mode
+      no_log: true
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import base64
+            import json
+            import secrets
+            import subprocess
+            import sys
+
+            (
+                kubeconfig,
+                ns,
+                name,
+                host,
+                port,
+                db,
+                user,
+                pw,
+                backend_secret,
+                gitlab_enabled_str,
+                gitlab_ns,
+                gitlab_deploy,
+                gitlab_app_name,
+                gitlab_client_id,
+                gitlab_client_secret,
+                backstage_hostname,
+                oidc_enabled_str,
+                kc_ns,
+                kc_secret_name,
+                oidc_meta_url,
+                oidc_client_id,
+                oidc_client_secret,
+            ) = sys.argv[1:23]
+
+            gitlab_enabled = gitlab_enabled_str.lower() == "true"
+            oidc_enabled = oidc_enabled_str.lower() == "true"
+
+            def get_secret_map(target_ns, target_name):
+                try:
+                    raw = subprocess.check_output(
+                        ["kubectl", "--kubeconfig", kubeconfig, "-n", target_ns, "get", "secret", target_name, "-o", "json"],
+                        stderr=subprocess.DEVNULL,
+                        text=True,
+                    )
+                    data = json.loads(raw).get("data", {})
+                    return {k: base64.b64decode(v).decode() for k, v in data.items() if v}
+                except subprocess.CalledProcessError:
+                    return {}
+
+            existing = get_secret_map(ns, name)
+
+            # Preserve existing auto-generated BACKEND_SECRET across runs if omitted from vault
+            if not backend_secret:
+                backend_secret = existing.get("BACKEND_SECRET") or secrets.token_urlsafe(32)
+
+            # Auto-discover Keycloak OIDC client credentials from keycloak namespace when not manually supplied
+            oidc_active = False
+            if oidc_enabled:
+                if not oidc_client_secret:
+                    kc_sec = get_secret_map(kc_ns, kc_secret_name)
+                    if kc_sec.get("OIDC_CLIENT_SECRET"):
+                        oidc_client_id = kc_sec.get("OIDC_CLIENT_ID", oidc_client_id)
+                        oidc_client_secret = kc_sec["OIDC_CLIENT_SECRET"]
+                        oidc_meta_url = kc_sec.get("OIDC_METADATA_URL", oidc_meta_url)
+                if oidc_client_id and oidc_client_secret and oidc_meta_url:
+                    oidc_active = True
+
+            # Auto-register or preserve GitLab OAuth application inside GitLab CE when not manually supplied
+            gitlab_active = False
+            if gitlab_enabled:
+                if not (gitlab_client_id and gitlab_client_secret):
+                    saved_id = existing.get("GITLAB_CLIENT_ID", "")
+                    saved_secret = existing.get("GITLAB_CLIENT_SECRET", "")
+                    redirect_uri = f"https://{backstage_hostname}/api/auth/gitlab/handler/frame"
+                    # Check if GitLab deployment has a ready pod before running gitlab-rails runner
+                    try:
+                        pod_check = subprocess.check_output(
+                            [
+                                "kubectl", "--kubeconfig", kubeconfig,
+                                "-n", gitlab_ns, "get", "deployment", gitlab_deploy,
+                                "-o", "jsonpath={.status.readyReplicas}",
+                            ],
+                            stderr=subprocess.DEVNULL,
+                            text=True,
+                        ).strip()
+                    except subprocess.CalledProcessError:
+                        pod_check = ""
+
+                    if pod_check and int(pod_check) >= 1:
+                        ruby_lines = [
+                            "require 'json'",
+                            f"app_name = {json.dumps(gitlab_app_name)}",
+                            f"redirect = {json.dumps(redirect_uri)}",
+                            "scopes = 'read_user api read_repository'",
+                            f"saved_uid = {json.dumps(saved_id)}",
+                            f"saved_sec = {json.dumps(saved_secret)}",
+                            "app = Doorkeeper::Application.find_by(uid: saved_uid) if !saved_uid.empty?",
+                            "app ||= Doorkeeper::Application.find_by(name: app_name)",
+                            "if app && !saved_uid.empty? && !saved_sec.empty? && app.uid == saved_uid",
+                            "  if app.redirect_uri != redirect || app.scopes.to_s != scopes || !app.confidential || !app.trusted",
+                            "    app.update!(redirect_uri: redirect, scopes: scopes, confidential: true, trusted: true)",
+                            "  end",
+                            "  puts 'BACKSTAGE_GITLAB_OAUTH=' + JSON.generate({ uid: app.uid, secret: saved_sec })",
+                            "elsif app",
+                            "  app.redirect_uri = redirect",
+                            "  app.scopes = scopes",
+                            "  app.confidential = true",
+                            "  app.trusted = true",
+                            "  app.renew_secret",
+                            "  app.save!",
+                            "  sec = app.respond_to?(:plaintext_secret) && app.plaintext_secret ? app.plaintext_secret : app.secret",
+                            "  puts 'BACKSTAGE_GITLAB_OAUTH=' + JSON.generate({ uid: app.uid, secret: sec })",
+                            "else",
+                            "  attrs = { name: app_name, redirect_uri: redirect, scopes: scopes, confidential: true, trusted: true }",
+                            "  if Doorkeeper::Application.column_names.include?('organization_id') && defined?(Organizations::Organization)",
+                            "    default_org = Organizations::Organization.default_organization",
+                            "    attrs[:organization_id] = default_org.id if default_org",
+                            "  end",
+                            "  app = Doorkeeper::Application.create!(**attrs)",
+                            "  sec = app.respond_to?(:plaintext_secret) && app.plaintext_secret ? app.plaintext_secret : app.secret",
+                            "  puts 'BACKSTAGE_GITLAB_OAUTH=' + JSON.generate({ uid: app.uid, secret: sec })",
+                            "end",
+                        ]
+                        ruby_code = "\n".join(ruby_lines) + "\n"
+                        rails_out = subprocess.check_output(
+                            [
+                                "kubectl", "--kubeconfig", kubeconfig,
+                                "-n", gitlab_ns, "exec", "-i", f"deployment/{gitlab_deploy}",
+                                "--", "gitlab-rails", "runner", "-",
+                            ],
+                            input=ruby_code,
+                            text=True,
+                        )
+                        for line in rails_out.splitlines():
+                            if line.startswith("BACKSTAGE_GITLAB_OAUTH="):
+                                creds = json.loads(line.split("=", 1)[1])
+                                gitlab_client_id = creds["uid"]
+                                gitlab_client_secret = creds["secret"]
+                                break
+                    elif saved_id and saved_secret:
+                        gitlab_client_id = saved_id
+                        gitlab_client_secret = saved_secret
+
+                if gitlab_client_id and gitlab_client_secret:
+                    gitlab_active = True
+
+            string_data = {
+                "POSTGRES_HOST": host,
+                "POSTGRES_PORT": str(port),
+                "POSTGRES_DB": db,
+                "POSTGRES_USER": user,
+                "POSTGRES_PASSWORD": pw,
+                "BACKEND_SECRET": backend_secret,
+            }
+            if oidc_active:
+                string_data["OIDC_METADATA_URL"] = oidc_meta_url
+                string_data["OIDC_CLIENT_ID"] = oidc_client_id
+                string_data["OIDC_CLIENT_SECRET"] = oidc_client_secret
+            if gitlab_active:
+                string_data["GITLAB_CLIENT_ID"] = gitlab_client_id
+                string_data["GITLAB_CLIENT_SECRET"] = gitlab_client_secret
+
+            secret = {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {"name": name, "namespace": ns},
+                "type": "Opaque",
+                "stringData": string_data,
+            }
+            out = subprocess.check_output(
+                ["kubectl", "--kubeconfig", kubeconfig, "apply", "-f", "-"],
+                input=json.dumps(secret),
+                text=True,
+            ).strip()
+            print(json.dumps({
+                "apply": out,
+                "oidc_active": oidc_active,
+                "gitlab_active": gitlab_active,
+            }))
+          - "{{ backstage_kubeconfig }}"
+          - "{{ backstage_namespace }}"
+          - "{{ backstage_name }}-secrets"
+          - "{{ backstage_pg_host }}"
+          - "{{ backstage_pg_port | string }}"
+          - "{{ backstage_pg_database }}"
+          - "{{ backstage_pg_user }}"
+          - "{{ backstage_pg_password }}"
+          - "{{ backstage_backend_secret }}"
+          - "{{ backstage_gitlab_auth_enabled | string }}"
+          - "{{ backstage_gitlab_namespace }}"
+          - "{{ backstage_gitlab_deployment }}"
+          - "{{ backstage_gitlab_oauth_app_name }}"
+          - "{{ backstage_gitlab_client_id }}"
+          - "{{ backstage_gitlab_client_secret }}"
+          - "{{ backstage_hostname }}"
+          - "{{ backstage_oidc_auth_enabled | string }}"
+          - "{{ backstage_oidc_keycloak_namespace }}"
+          - "{{ backstage_oidc_keycloak_secret_name }}"
+          - "{{ backstage_oidc_metadata_url }}"
+          - "{{ backstage_oidc_client_id }}"
+          - "{{ backstage_oidc_client_secret }}"
+      register: _backstage_secret_apply
+      changed_when: >-
+        ('created' in (_backstage_secret_apply.stdout | default('')))
+        or ('configured' in (_backstage_secret_apply.stdout | default('')))
+
+    - name: Record active Backstage authentication providers
+      ansible.builtin.set_fact:
+        _backstage_oidc_active: >-
+          {{
+            ((_backstage_secret_apply.stdout | default('{}') | from_json).oidc_active | default(false))
+            if (not ansible_check_mode)
+            else (backstage_oidc_auth_enabled | bool)
+          }}
+        _backstage_gitlab_active: >-
+          {{
+            ((_backstage_secret_apply.stdout | default('{}') | from_json).gitlab_active | default(false))
+            if (not ansible_check_mode)
+            else (backstage_gitlab_auth_enabled | bool)
+          }}
+
+    - name: Check if HomeLab Root CA certificate file exists for Backstage Node.js trust
+      ansible.builtin.stat:
+        path: "{{ backstage_ca_cert_file }}"
+      register: _backstage_ca_cert_stat
+
+    - name: Create or update Backstage custom CA Secret from HomeLab Root CA
+      ansible.builtin.shell:
+        cmd: >-
+          kubectl --kubeconfig {{ backstage_kubeconfig }}
+          -n {{ backstage_namespace }} create secret generic {{ backstage_ca_secret_name }}
+          --from-file=homelab-root-ca.crt={{ backstage_ca_cert_file }}
+          --dry-run=client -o yaml
+          | kubectl --kubeconfig {{ backstage_kubeconfig }} apply -f -
+      when:
+        - _backstage_ca_cert_stat.stat.exists
+        - not ansible_check_mode
+      register: _backstage_ca_secret_apply
+      changed_when: >-
+        ('created' in _backstage_ca_secret_apply.stdout)
+        or ('configured' in _backstage_ca_secret_apply.stdout)
+
+    - name: Ensure Backstage manifest directory exists
+      ansible.builtin.file:
+        path: "{{ backstage_manifest_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Render Backstage Kubernetes manifests
+      ansible.builtin.template:
+        src: backstage.yaml.j2
+        dest: "{{ backstage_manifest_dir }}/{{ backstage_name }}.yaml"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply Backstage Kubernetes manifests
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ backstage_kubeconfig }}
+          apply -f {{ backstage_manifest_dir }}/{{ backstage_name }}.yaml
+      when: not ansible_check_mode
+      register: _backstage_manifest_apply
+      changed_when: >-
+        ('created' in _backstage_manifest_apply.stdout)
+        or ('configured' in _backstage_manifest_apply.stdout)
+
+    - name: Restart Backstage deployment if ConfigMap or Secret changed
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ backstage_kubeconfig }}
+          -n {{ backstage_namespace }}
+          rollout restart deployment/{{ backstage_name }}
+      when:
+        - not ansible_check_mode
+        - >-
+          (_backstage_secret_apply is changed)
+          or (_backstage_ca_secret_apply is changed)
+          or (('configmap/' ~ backstage_name ~ '-app-config configured') in (_backstage_manifest_apply.stdout | default('')))
+        - "'deployment.apps/' ~ backstage_name ~ ' created' not in (_backstage_manifest_apply.stdout | default(''))"
+      changed_when: true
+
+    - name: Wait for Backstage deployment to become Ready
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig {{ backstage_kubeconfig }}
+          -n {{ backstage_namespace }}
+          rollout status deployment/{{ backstage_name }} --timeout=300s
+      when: not ansible_check_mode
+      changed_when: false
+
+    - name: Report Backstage deployment summary
+      ansible.builtin.debug:
+        msg: >-
+          Backstage ({{ backstage_image }}) is active in namespace '{{ backstage_namespace }}'
+          connected to external PostgreSQL {{ backstage_pg_host }}:{{ backstage_pg_port }}/{{ backstage_pg_database }} (pluginDivisionMode: schema).
+          Auth providers: OIDC={{ _backstage_oidc_active }}, GitLab={{ _backstage_gitlab_active }}, RBAC={{ backstage_rbac_enabled }}.
+          Web UI: https://{{ backstage_hostname }}.
+      when: (_backstage_manifest_apply is changed) or (_backstage_secret_apply is changed)

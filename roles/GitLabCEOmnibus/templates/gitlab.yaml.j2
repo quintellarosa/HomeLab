@@ -1,0 +1,192 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ gitlab_name }}-config
+  namespace: {{ gitlab_namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ gitlab_config_storage_size }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ gitlab_name }}-data
+  namespace: {{ gitlab_namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ gitlab_data_storage_size }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ gitlab_name }}-logs
+  namespace: {{ gitlab_namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ gitlab_logs_storage_size }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ gitlab_name }}
+  namespace: {{ gitlab_namespace }}
+  labels:
+    app: {{ gitlab_name }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ gitlab_name }}
+  template:
+    metadata:
+      labels:
+        app: {{ gitlab_name }}
+    spec:
+      containers:
+        - name: gitlab
+          image: {{ gitlab_image }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+            - name: ssh
+              containerPort: 22
+          env:
+            - name: GITLAB_OMNIBUS_CONFIG
+              value: "eval File.read('/etc/gitlab-ansible/gitlab-omnibus.rb')"
+            - name: GITLAB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ gitlab_name }}-secrets
+                  key: root_password
+          volumeMounts:
+            - name: config
+              mountPath: /etc/gitlab
+            - name: data
+              mountPath: /var/opt/gitlab
+            - name: logs
+              mountPath: /var/log/gitlab
+            - name: omnibus-config
+              mountPath: /etc/gitlab-ansible
+              readOnly: true
+            - name: dshm
+              mountPath: /dev/shm
+{% if _gitlab_ca_cert_stat.stat.exists | default(false) %}
+            - name: homelab-ca
+              mountPath: /etc/gitlab-ansible/ca
+              readOnly: true
+{% endif %}
+          startupProbe:
+            httpGet:
+              path: /-/readiness
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 40
+          readinessProbe:
+            httpGet:
+              path: /-/readiness
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /-/liveness
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: config
+          persistentVolumeClaim:
+            claimName: {{ gitlab_name }}-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ gitlab_name }}-data
+        - name: logs
+          persistentVolumeClaim:
+            claimName: {{ gitlab_name }}-logs
+        - name: omnibus-config
+          secret:
+            secretName: {{ gitlab_name }}-secrets
+            items:
+              - key: gitlab-omnibus.rb
+                path: gitlab-omnibus.rb
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
+{% if _gitlab_ca_cert_stat.stat.exists | default(false) %}
+        - name: homelab-ca
+          secret:
+            secretName: {{ gitlab_ca_secret_name }}
+{% endif %}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ gitlab_name }}-web
+  namespace: {{ gitlab_namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ gitlab_name }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+{% if gitlab_expose_ssh_loadbalancer | bool %}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ gitlab_name }}-ssh
+  namespace: {{ gitlab_namespace }}
+spec:
+  type: LoadBalancer
+  selector:
+    app: {{ gitlab_name }}
+  ports:
+    - name: ssh
+      port: {{ gitlab_ssh_port }}
+      targetPort: ssh
+{% endif %}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ gitlab_name }}-ingress
+  namespace: {{ gitlab_namespace }}
+  annotations:
+    cert-manager.io/cluster-issuer: {{ gitlab_cert_manager_issuer }}
+spec:
+  ingressClassName: {{ gitlab_ingress_class_name }}
+  tls:
+    - hosts:
+        - {{ gitlab_hostname }}
+      secretName: {{ gitlab_tls_secret_name }}
+  rules:
+    - host: {{ gitlab_hostname }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ gitlab_name }}-web
+                port:
+                  number: 80

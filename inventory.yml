@@ -21,20 +21,38 @@ all:
           start: "192.168.122.240"
           end: "192.168.122.250"
     postgresql:
-      host: "{{ network.gateway }}"
-      port: 5432
-      sslmode: "prefer"
-      databases:
-        awx:
-          name: "awx"
-          user: "awx"
-  hosts:
-    localhost:
-      ansible_connection: local
-      # Ubuntu 26.04 defaults /usr/bin/sudo to sudo-rs; use sudo.ws when present, standard sudo on RedHat/other distros.
-      ansible_become_exe: "{{ 'sudo.ws' if (lookup('ansible.builtin.fileglob', '/usr/bin/sudo.ws') | length > 0) else 'sudo' }}"
+      awx:
+        host: "{{ network.gateway }}"
+        port: 5432
+        sslmode: "prefer"
+        database: "awx"
+        user: "awx"
+      gitlab:
+        host: "{{ network.gateway }}"
+        port: 5432
+        sslmode: "prefer"
+        database: "gitlabhq_production"
+        user: "gitlab"
+      backstage:
+        host: "{{ network.gateway }}"
+        port: 5432
+        sslmode: "prefer"
+        database: "backstage"
+        user: "backstage"
+      keycloak:
+        host: "{{ network.gateway }}"
+        port: 5432
+        sslmode: "prefer"
+        database: "keycloak"
+        user: "keycloak"
   children:
-    DmnCtl:
+    PersonalComputers:
+      hosts:
+        DellPrecision7550:
+          ansible_connection: local
+          # Ubuntu 26.04 defaults /usr/bin/sudo to sudo-rs; use sudo.ws when present, standard sudo on RedHat/other distros.
+          ansible_become_exe: "{{ 'sudo.ws' if (lookup('ansible.builtin.fileglob', '/usr/bin/sudo.ws') | length > 0) else 'sudo' }}"
+    DomainControllers:
       vars:
         ansible_connection: ssh
         ansible_shell_type: powershell

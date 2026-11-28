@@ -1,0 +1,54 @@
+---
+# GitLab CE Omnibus image & Kubernetes placement
+gitlab_name: "gitlab"
+gitlab_namespace: "gitlab"
+gitlab_image: "gitlab/gitlab-ce:19.6.2-ce.0"
+gitlab_manifest_dir: "/etc/kubernetes/gitlab"
+
+# Web UI & TLS settings (follows global inventory 'network.domain')
+gitlab_hostname: "gitlab.{{ network.domain }}"
+gitlab_ingress_class_name: "cilium"
+gitlab_cert_manager_issuer: "homelab-ca"
+gitlab_tls_secret_name: "{{ gitlab_name }}-tls-secret"
+
+# Initial root user password (provided via vault/vault.yml -> vault_gitlab_root_password)
+gitlab_root_password: "{{ vault_gitlab_root_password | default('') }}"
+
+# External PostgreSQL connection settings (derived from per-service 'postgresql.gitlab' in inventory.yml)
+gitlab_pg_host: "{{ postgresql.gitlab.host }}"
+gitlab_pg_port: "{{ postgresql.gitlab.port | default(5432) }}"
+gitlab_pg_database: "{{ postgresql.gitlab.database | default('gitlabhq_production') }}"
+gitlab_pg_user: "{{ postgresql.gitlab.user | default('gitlab') }}"
+gitlab_pg_sslmode: "{{ postgresql.gitlab.sslmode | default('prefer') }}"
+gitlab_pg_password: "{{ vault_gitlab_pg_password | default('') }}"
+
+# Local PostgreSQL automation (only runs when postgresql.host points to this host; leaves PostgreSQL role untouched)
+gitlab_manage_local_postgres_db: true
+gitlab_pod_network_cidr: "{{ kubernetes_pod_network_cidr | default('10.244.0.0/16') }}"
+gitlab_pg_hba_auth_method: "scram-sha-256"
+gitlab_pg_service_name: "postgresql"
+gitlab_configure_pg_firewall: true
+# GitLab 19.x loads 60k+ lines of partitioned schema in a single transaction (PG default 64 is too low)
+gitlab_pg_max_locks_per_transaction: 512
+
+# HomeLab Private Root CA trust inside GitLab (/etc/gitlab/trusted-certs/)
+gitlab_ca_cert_file: "/etc/kubernetes/homelab-root-ca.crt"
+gitlab_ca_secret_name: "{{ gitlab_name }}-custom-cacert"
+
+# Storage (ReadWriteOnce via default local-path StorageClass)
+gitlab_config_storage_size: "1Gi"
+gitlab_data_storage_size: "20Gi"
+gitlab_logs_storage_size: "2Gi"
+
+# Expose Git SSH service via MetalLB LoadBalancer (port 22)
+gitlab_expose_ssh_loadbalancer: true
+gitlab_ssh_port: 22
+
+# HomeLab workstation resource tuning
+gitlab_puma_workers: 2
+gitlab_sidekiq_concurrency: 10
+gitlab_enable_prometheus: false
+
+# Kubernetes control-plane detection paths (kubeadm master)
+gitlab_kubeconfig: "/etc/kubernetes/admin.conf"
+gitlab_apiserver_manifest: "/etc/kubernetes/manifests/kube-apiserver.yaml"

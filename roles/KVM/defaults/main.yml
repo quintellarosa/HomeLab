@@ -1,51 +1,51 @@
 ---
-virtualization_user: "{{ target_user | default(lookup('ansible.builtin.env', 'SUDO_USER') or lookup('ansible.builtin.env', 'USER'), true) }}"
-virtualization_enable_default_network: true
-virtualization_default_network_name: "default"
+kvm_user: "{{ target_user | default(lookup('ansible.builtin.env', 'SUDO_USER') or lookup('ansible.builtin.env', 'USER'), true) }}"
+kvm_enable_default_network: true
+kvm_default_network_name: "default"
 
 # Virtual network parameters derived from global inventory 'network' object when defined
-virtualization_default_network_bridge: "{{ network.name | default('virbr0') if (network is defined) else 'virbr0' }}"
-virtualization_default_network_gateway: "{{ network.gateway | default('192.168.122.1') if (network is defined) else '192.168.122.1' }}"
-virtualization_default_network_netmask: "{{ network.netmask | default('255.255.255.0') if (network is defined) else '255.255.255.0' }}"
+kvm_default_network_bridge: "{{ network.name | default('virbr0') if (network is defined) else 'virbr0' }}"
+kvm_default_network_gateway: "{{ network.gateway | default('192.168.122.1') if (network is defined) else '192.168.122.1' }}"
+kvm_default_network_netmask: "{{ network.netmask | default('255.255.255.0') if (network is defined) else '255.255.255.0' }}"
 
 # Disable libvirt built-in DHCP on the default network (e.g. when Windows Server provides DHCP)
-virtualization_default_network_dhcp: false
-virtualization_default_network_dhcp_start: >-
+kvm_default_network_dhcp: false
+kvm_default_network_dhcp_start: >-
   {{
     network.ranges.dhcp.start
     if (network is defined and network.ranges is defined and network.ranges.dhcp is defined)
     else ''
   }}
-virtualization_default_network_dhcp_end: >-
+kvm_default_network_dhcp_end: >-
   {{
     network.ranges.dhcp.end
     if (network is defined and network.ranges is defined and network.ranges.dhcp is defined)
     else ''
   }}
-virtualization_user_groups:
+kvm_user_groups:
   - libvirt
   - kvm
 
 # PCI-Express Passthrough (IOMMU + VFIO)
-virtualization_enable_pcie_passthrough: true
-virtualization_vfio_modules:
+kvm_enable_pcie_passthrough: true
+kvm_vfio_modules:
   - vfio
   - vfio_iommu_type1
   - vfio_pci
 
 # Optional list of PCI "vendor:device" IDs to bind to vfio-pci at boot.
 # 144d:a80a = Samsung PM9A1 476.9G NVMe SSD (02:00.0, IOMMU group 16).
-virtualization_vfio_pci_ids:
+kvm_vfio_pci_ids:
   - "144d:a80a"
 
 # Kernel driver names that must wait for vfio-pci so vfio-pci claims the PCI IDs first.
-virtualization_vfio_softdeps:
+kvm_vfio_softdeps:
   - nvme
-  
-# Ignore unhandled MSRs in KVM (recommended for Windows / Windows Server guests)
-virtualization_kvm_ignore_msrs: true
 
-virtualization_packages_by_family:
+# Ignore unhandled MSRs in KVM (recommended for Windows / Windows Server guests)
+kvm_ignore_msrs: true
+
+kvm_packages_by_family:
   Debian:
     common:
       - qemu-utils
@@ -94,15 +94,15 @@ virtualization_packages_by_family:
       - qemu-arm
       - qemu-uefi-aarch64
 
-virtualization_arch_key: >-
+kvm_arch_key: >-
   {{
     'aarch64'
     if ansible_facts['architecture'] in ['aarch64', 'arm64']
     else 'x86_64'
   }}
 
-virtualization_packages: >-
+kvm_packages: >-
   {{
-    (virtualization_packages_by_family[ansible_facts['os_family']]['common'] | default([]))
-    + (virtualization_packages_by_family[ansible_facts['os_family']][virtualization_arch_key] | default([]))
+    (kvm_packages_by_family[ansible_facts['os_family']]['common'] | default([]))
+    + (kvm_packages_by_family[ansible_facts['os_family']][kvm_arch_key] | default([]))
   }}

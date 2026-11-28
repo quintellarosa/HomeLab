@@ -1,0 +1,65 @@
+---
+# Backstage.io (Red Hat Developer Hub Community distribution) image & placement
+backstage_name: "backstage"
+backstage_namespace: "backstage"
+backstage_image: "quay.io/rhdh-community/rhdh:1.9"
+backstage_manifest_dir: "/etc/kubernetes/backstage"
+backstage_port: 7007
+
+# Branding & Web UI / TLS settings (follows global inventory 'network.domain')
+backstage_app_title: "HomeLab Developer Portal"
+backstage_org_name: "Quintella Rosa HomeLab"
+backstage_hostname: "backstage.{{ network.domain }}"
+backstage_gitlab_hostname: "gitlab.{{ network.domain }}"
+backstage_ingress_class_name: "cilium"
+backstage_cert_manager_issuer: "homelab-ca"
+backstage_tls_secret_name: "{{ backstage_name }}-tls-secret"
+
+# External PostgreSQL connection settings (derived from per-service 'postgresql.backstage' in inventory.yml)
+backstage_pg_host: "{{ postgresql.backstage.host }}"
+backstage_pg_port: "{{ postgresql.backstage.port | default(5432) }}"
+backstage_pg_database: "{{ postgresql.backstage.database | default('backstage') }}"
+backstage_pg_user: "{{ postgresql.backstage.user | default('backstage') }}"
+backstage_pg_sslmode: "{{ postgresql.backstage.sslmode | default('prefer') }}"
+backstage_pg_password: "{{ vault_backstage_pg_password | default('') }}"
+
+# Optional backend auth signing secret (auto-generated & persisted in K8s Secret if omitted)
+backstage_backend_secret: "{{ vault_backstage_backend_secret | default('') }}"
+
+# Local PostgreSQL automation (only runs when postgresql.backstage.host points to this host; leaves PostgreSQL role untouched)
+backstage_manage_local_postgres_db: true
+backstage_pod_network_cidr: "{{ kubernetes_pod_network_cidr | default('10.244.0.0/16') }}"
+backstage_pg_hba_auth_method: "scram-sha-256"
+backstage_pg_service_name: "postgresql"
+backstage_configure_pg_firewall: true
+
+# HomeLab Private Root CA trust inside Backstage (NODE_EXTRA_CA_CERTS)
+backstage_ca_cert_file: "/etc/kubernetes/homelab-root-ca.crt"
+backstage_ca_secret_name: "{{ backstage_name }}-custom-cacert"
+
+# Authentication providers: GitLab CE OAuth + Keycloak OIDC (AD Federation)
+backstage_allow_guest_auth: false
+
+backstage_gitlab_auth_enabled: true
+backstage_gitlab_namespace: "gitlab"
+backstage_gitlab_deployment: "gitlab"
+backstage_gitlab_oauth_app_name: "Backstage"
+backstage_gitlab_client_id: "{{ vault_backstage_gitlab_client_id | default('') }}"
+backstage_gitlab_client_secret: "{{ vault_backstage_gitlab_client_secret | default('') }}"
+
+backstage_oidc_auth_enabled: true
+backstage_oidc_keycloak_namespace: "keycloak"
+backstage_oidc_keycloak_secret_name: "keycloak-backstage-oidc"
+backstage_oidc_metadata_url: "https://keycloak.{{ network.domain }}/realms/homelab/.well-known/openid-configuration"
+backstage_oidc_client_id: "backstage"
+backstage_oidc_client_secret: "{{ vault_backstage_oidc_client_secret | default('') }}"
+
+# Backstage RBAC Admin configuration (enables Administration -> RBAC UI)
+backstage_rbac_enabled: true
+backstage_rbac_admin_users:
+  - "user:default/root"
+  - "user:default/administrator"
+
+# Kubernetes control-plane detection paths (kubeadm master)
+backstage_kubeconfig: "/etc/kubernetes/admin.conf"
+backstage_apiserver_manifest: "/etc/kubernetes/manifests/kube-apiserver.yaml"
